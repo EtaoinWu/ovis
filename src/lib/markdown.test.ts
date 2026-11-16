@@ -405,6 +405,26 @@ describe("inline markdown", () => {
     ]);
   });
 
+  it("takes a definition only where the document's own paragraph begins, as its reader reads the blocks", () => {
+    const right = (blocks: ReturnType<typeof parseMarkdown>): string[] => blocks.flatMap((block) => block.type === "paragraph" ? block.lines.flat() : [])
+      .flatMap((node) => node.type === "link" && node.children[0]?.type === "text" && node.children[0].value === "docs" ? [node.href] : []);
+    // a list item's indented definition is the item's text, in chat and in a Preview
+    for (const html of [false, true]) {
+      expect(right(parseMarkdown("See [docs].\n\n- Source note\n\n  [docs]: https://wrong.example\n\n[docs]: https://right.example", 0, html))).toEqual(["https://right.example"]);
+    }
+    // a used definition after a list ends the list where the reader ends it: an indented comment after it is still a comment
+    expect(right(parseMarkdown("- a\n\n[x]: https://x.dev\n\n  <!--\n\n[docs]: https://wrong.example\n\n  -->\n\n[docs]: https://right.example\n\n[docs] [x]", 0, true))).toEqual(["https://right.example"]);
+    // and a ``` in that comment opens no fence, so a later code block keeps its lines
+    expect(parseMarkdown("- a\n\n[x]: https://x.dev\n\n  <!--\n  ```\n  -->\n\n[a]: https://a.dev\n\n```\n\n[a] [x]", 0, true).at(-1)).toEqual({ type: "code", language: "", value: "\n[a] [x]" });
+    expect(parseMarkdown("- a\n\n[x]: https://x.dev\n\n  more\n\n[x]")).toMatchObject([{ type: "list", items: [{ content: [{ type: "text", value: "a" }] }] }, { type: "paragraph", lines: [[{ type: "text", value: "  more" }]] }, { type: "paragraph" }]);
+    // a `- ` line in a formula or a table row is no list, so the comment after it is one
+    for (const before of ["$$\n- x\n  $$", "a|b\n-|-\n- x|y", "  - a\n", "- a\n  ```\n  x\n  ```"]) {
+      expect(right(parseMarkdown(`${before}\n  <!--\n\n[docs]: https://wrong.example\n\n-->\n\n[docs]: https://right.example\n\n[docs]`, 0, true)), before).toEqual(["https://right.example"]);
+    }
+    // a heading is a block of its own, so a definition may follow it
+    expect(right(parseMarkdown("# Guide\n[docs]: https://right.example\n\n[docs]"))).toEqual(["https://right.example"]);
+  });
+
   it("reads no definition and no fence inside a file's HTML block", () => {
     // a definition commented out defines nothing: the one after the comment does
     expect(parseMarkdown("<!--\n\n[docs]: https://wrong.example\n\n-->\n\n[docs]: https://right.example\n\n[docs]", 0, true)).toEqual([

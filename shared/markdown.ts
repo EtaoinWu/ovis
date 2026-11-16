@@ -1,7 +1,7 @@
 import { fileUriPath } from "./fileUri.ts";
 import { charBefore } from "./lookbehind.ts";
 import { visualizationReference, type VisualizationReference } from "./visualization.ts";
-import { htmlBlockEnd, parseHtmlBlock, startsHtml } from "./markdownHtml.ts";
+import { parseHtmlBlock, startsHtml } from "./markdownHtml.ts";
 
 export type InlineNode =
   | { type: "text"; value: string }
@@ -409,8 +409,6 @@ export function parseInline(source: string, links = true, depth = 0, references?
 // `s`: the text may hold a line separator (U+2028) that `.` would stop at, and the pattern then
 // tries every split of the spaces before it; with it the line is an item, as it reads
 const listLine = /^(\s*)([-*]|\d+\.)\s+(.+)$/s;
-/** A thematic break (`---`, `* * *`), which is read before a list item it also looks like. */
-const ruleLine = /^(?:\s*[-*_]){3,}\s*$/;
 /**
  * The line under a table's header: two or more cells of dashes (`---`, `:-:`; one dash is enough, as on GitHub), with or without
  * the outer pipes. Read cell by cell: one pattern for the whole line tries every way to share
@@ -450,7 +448,7 @@ function parseTable(lines: string[], start: number, within = 0, references?: Lin
 
 function startsBlock(lines: string[], index: number, html = false, visualizations = false): boolean {
   const line = lines[index] ?? "";
-  return (visualizations && visualizationReference(line) !== null) || (html && startsHtml(line)) || /^\s*(?:\\\[|\$\$)/.test(line) || /^\s{0,3}```/.test(line) || /^#{1,6}\s+/.test(line) || /^\s*>/.test(line) || ruleLine.test(line) || listLine.test(line)
+  return (visualizations && visualizationReference(line) !== null) || (html && startsHtml(line)) || /^\s*(?:\\\[|\$\$)/.test(line) || /^\s{0,3}```/.test(line) || /^#{1,6}\s+/.test(line) || /^\s*>/.test(line) || /^(?:\s*[-*_]){3,}\s*$/.test(line) || listLine.test(line)
     || startsTable(lines, index);
 }
 
@@ -615,52 +613,31 @@ const MAX_QUOTE_DEPTH = 32;
 const definitionLine = /^ {0,3}\[([^[\]\n]+)\]:[ \t]*(<[^<>\n]*>|[^\s<]\S*)(?:[ \t]+("[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*$/;
 
 /**
- * The link reference definitions of a document (`[label]: https://x.dev "title"`), the first one of
- * each label. A definition is a line of its own, outside a fenced code block, and does not go on
- * from a paragraph: it follows the start, a blank line, a fence or another definition. With `html`,
- * nothing in an HTML block (a comment above all) is one. Its line is blanked, as it draws nothing.
- * A footnote's (`[^1]: …`) is no link's.
+ * A document's link reference definitions (`[label]: https://x.dev "title"`), the first one of each
+ * label: lines that begin one of the document's own paragraphs, as its reader reads them, so none in
+ * a quote, a list item, an HTML block or code. A footnote's (`[^1]: …`) is no link's. It notes the
+ * labels a reference used; the lines of those in `hidden` draw nothing.
  */
-function takeDefinitions(lines: string[], html: boolean): DocumentReferences {
-  const references = new DocumentReferences();
-  let fenced = false;
-  let starts = true;
-  let listEnd = 0;
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index]!;
-    if (fenced) {
-      if (/^\s{0,3}```\s*$/.test(line)) { fenced = false; starts = true; }
-      continue;
-    }
-    if (/^ {0,3}```/.test(line)) { fenced = true; continue; }
-    // the lines of an HTML block are its own, a ``` among them too, wherever the reader reads one: not in a
-    // list, whose items read a tag on as their text (parseList says where the list ends)
-    if (html && index >= listEnd) {
-      if (startsHtml(line)) {
-        index = htmlBlockEnd(lines, index) - 1;
-        starts = true;
-        continue;
-      }
-      if (listLine.test(line) && !ruleLine.test(line)) listEnd = parseList(lines, index).next;
-    }
-    if (line.trim() === "") { starts = true; continue; }
-    // after any other line, a line goes on from what that one began (a paragraph, an item) until a blank one
-    if (!starts) continue;
-    const definition = linkDefinition(line);
-    starts = definition !== null;
-    if (definition === null) continue;
-    if (!references.has(definition.key)) references.set(definition.key, definition.link);
-    references.lines.set(index, { key: definition.key, text: line });
-    lines[index] = "";
-  }
-  return references;
-}
-
-/** A document's definitions, which note the labels a reference used, and the lines they were taken from. */
 class DocumentReferences extends Map<string, LinkDefinition> {
   readonly used = new Set<string>();
-  /** each definition's line as written, by its index, and the label it defines */
-  readonly lines = new Map<number, { key: string; text: string }>();
+  /** the label each definition's line defines, by its index */
+  readonly lines = new Map<number, string>();
+  /** null while the reader finds the definitions */
+  hidden: ReadonlySet<string> | null = null;
+  /** Whether the line at `index`, which begins one of the document's own paragraphs, is a definition that draws nothing. */
+  takes(index: number, line: string): boolean {
+    if (this.hidden !== null) return this.hides(index);
+    const definition = linkDefinition(line);
+    if (definition === null) return false;
+    if (!this.has(definition.key)) this.set(definition.key, definition.link);
+    this.lines.set(index, definition.key);
+    return true;
+  }
+  /** Whether the line at `index` is a definition that draws nothing. */
+  hides(index: number): boolean {
+    const key = this.lines.get(index);
+    return key !== undefined && this.hidden !== null && this.hidden.has(key);
+  }
   override get(key: string): LinkDefinition | undefined {
     const link = super.get(key);
     if (link !== undefined) this.used.add(key);
@@ -685,13 +662,18 @@ function linkDefinition(line: string): { key: string; link: LinkDefinition } | n
 export function parseMarkdown(source: string, depth = 0, html = false, visualizations = false, references?: LinkReferences): MarkdownBlock[] {
   const lines = source.replace(/\r\n?/g, "\n").split("\n");
   if (references !== undefined) return readBlocks(lines, depth, html, visualizations, references);
-  const definitions = takeDefinitions(lines, html);
+  const definitions = new DocumentReferences();
+  // a first reading finds the definitions: only the reader knows where the document's own paragraphs begin
+  if (/^ {0,3}\[[^[\]\n]+\]:/m.test(source)) readBlocks(lines, depth, html, visualizations, definitions);
+  definitions.used.clear();
+  definitions.hidden = new Set(definitions.keys());
   const blocks = readBlocks(lines, depth, html, visualizations, definitions);
   if (definitions.used.size === definitions.size) return blocks;
   // a definition no reference used is the text it was written as, unlike CommonMark, which hides it:
   // a list of sources (`[1]: https://a.dev`) that nothing cites keeps its addresses
-  for (const [index, { key, text }] of definitions.lines) if (!definitions.used.has(key)) lines[index] = text;
-  return readBlocks(lines, depth, html, visualizations, new Map([...definitions].filter(([key]) => definitions.used.has(key))));
+  definitions.hidden = new Set(definitions.used);
+  for (const key of [...definitions.keys()]) if (!definitions.used.has(key)) definitions.delete(key);
+  return readBlocks(lines, depth, html, visualizations, definitions);
 }
 
 /** The blocks of `lines`, whose references link by `definitions`. */
@@ -699,6 +681,8 @@ function readBlocks(lines: string[], depth: number, html: boolean, visualization
   // `visualizations`: a Codex visualization reference on its own line is a block (shared/visualization.ts). Only a
   // chat answer asks for it; everywhere else the line stays the text it is
   const blocks: MarkdownBlock[] = [];
+  // the document itself, not a quote in it, whose paragraphs may begin with its definitions
+  const own = depth === 0 && definitions instanceof DocumentReferences ? definitions : null;
   let index = 0;
   // no formula opened before this line closes: the search that found so is not made again (one
   // line per delimiter, `\[` and `$$`)
@@ -778,7 +762,7 @@ function readBlocks(lines: string[], depth: number, html: boolean, visualization
       continue;
     }
 
-    if (ruleLine.test(line)) {
+    if (/^(?:\s*[-*_]){3,}\s*$/.test(line)) {
       blocks.push({ type: "hr" });
       index += 1;
       continue;
@@ -807,8 +791,9 @@ function readBlocks(lines: string[], depth: number, html: boolean, visualization
       continue;
     }
 
+    if (own?.takes(index, line)) { index += 1; continue; }
     const paragraph: InlineNode[][] = [];
-    while (index < lines.length && lineAt(lines, index).trim() !== "" && (paragraph.length === 0 || !startsBlock(lines, index, html, visualizations))) {
+    while (index < lines.length && lineAt(lines, index).trim() !== "" && (paragraph.length === 0 || !startsBlock(lines, index, html, visualizations)) && !own?.hides(index)) {
       paragraph.push(textLine(lineAt(lines, index), definitions));
       index += 1;
     }

@@ -1,7 +1,7 @@
 import { fileUriPath } from "./fileUri.ts";
 import { charBefore } from "./lookbehind.ts";
 import { visualizationReference, type VisualizationReference } from "./visualization.ts";
-import { parseHtmlBlock, startsHtml } from "./markdownHtml.ts";
+import { htmlBlockEnd, parseHtmlBlock, startsHtml } from "./markdownHtml.ts";
 
 export type InlineNode =
   | { type: "text"; value: string }
@@ -455,8 +455,16 @@ function startsBlock(lines: string[], index: number, html = false, visualization
 /** An item's text, with a GitHub task box (`[x]`, `[X]`, `[ ]`) read off its start. */
 function listItem(text: string, references?: LinkReferences): ListItem {
   const task = /^\[([ xX])\](?:\s+(.*))?$/.exec(text);
-  if (task === null) return { content: parseInline(text, true, 0, references) };
-  return { content: parseInline(task[2] ?? "", true, 0, references), checked: task[1] !== " " };
+  if (task === null) return { content: textLine(text, references) };
+  return { content: textLine(task[2] ?? "", references), checked: task[1] !== " " };
+}
+
+/**
+ * A line of text. One written as a definition that is not taken as one (in a quote or a list item,
+ * or after a paragraph's line) is the text it was written as: its label links nowhere.
+ */
+function textLine(line: string, references?: LinkReferences): InlineNode[] {
+  return parseInline(line, true, 0, linkDefinition(line) === null ? references : undefined);
 }
 
 function parseList(lines: string[], start: number, visualizations = false, references?: LinkReferences): { block: ListBlock; next: number } {
@@ -503,13 +511,13 @@ function parseList(lines: string[], start: number, visualizations = false, refer
         if (last === undefined) {
           // added to, not copied: an item of thousands of lines copies itself at every one
           item.content.push({ type: "text", value: " " });
-          for (const node of parseInline(line.trim(), true, 0, references)) item.content.push(node);
+          for (const node of textLine(line.trim(), references)) item.content.push(node);
         } else {
           // after a table or nested list the item's text goes on below it; a quote or rule
           // there ends the list and shows as its own block, as it did before tables nested
           if (startsBlock(lines, ahead, false, visualizations)) break;
-          if (last.type === "paragraph" && ahead === index) last.lines.push(parseInline(line.trim(), true, 0, references));
-          else item.blocks!.push({ type: "paragraph", lines: [parseInline(line.trim(), true, 0, references)] });
+          if (last.type === "paragraph" && ahead === index) last.lines.push(textLine(line.trim(), references));
+          else item.blocks!.push({ type: "paragraph", lines: [textLine(line.trim(), references)] });
         }
         index = ahead + 1;
         continue;
@@ -607,11 +615,12 @@ const definitionLine = /^ {0,3}\[([^[\]\n]+)\]:[ \t]*(<[^<>\n]*>|[^\s<]\S*)(?:[ 
 /**
  * The link reference definitions of a document (`[label]: https://x.dev "title"`), the first one of
  * each label. A definition is a line of its own, outside a fenced code block, and does not go on
- * from a paragraph: it follows the start, a blank line, a fence or another definition. Its line is
- * blanked, as it draws nothing. A footnote's (`[^1]: …`) is no link's.
+ * from a paragraph: it follows the start, a blank line, a fence or another definition. With `html`,
+ * nothing in an HTML block (a comment above all) is one. Its line is blanked, as it draws nothing.
+ * A footnote's (`[^1]: …`) is no link's.
  */
-function takeDefinitions(lines: string[]): LinkReferences {
-  const references = new Map<string, LinkDefinition>();
+function takeDefinitions(lines: string[], html: boolean): DocumentReferences {
+  const references = new DocumentReferences();
   let fenced = false;
   let starts = true;
   for (let index = 0; index < lines.length; index += 1) {
@@ -621,6 +630,13 @@ function takeDefinitions(lines: string[]): LinkReferences {
       continue;
     }
     if (/^ {0,3}```/.test(line)) { fenced = true; continue; }
+    // the lines of an HTML block are its own, a ``` among them too; one indented two spaces may be a
+    // list item's text instead, which the reader reads on as text, so its lines are read as any others
+    if (html && startsHtml(line) && !line.startsWith("  ")) {
+      index = htmlBlockEnd(lines, index) - 1;
+      starts = true;
+      continue;
+    }
     if (line.trim() === "") { starts = true; continue; }
     // after any other line, a line goes on from what that one began (a paragraph, an item) until a blank one
     if (!starts) continue;
@@ -628,9 +644,22 @@ function takeDefinitions(lines: string[]): LinkReferences {
     starts = definition !== null;
     if (definition === null) continue;
     if (!references.has(definition.key)) references.set(definition.key, definition.link);
+    references.lines.set(index, { key: definition.key, text: line });
     lines[index] = "";
   }
   return references;
+}
+
+/** A document's definitions, which note the labels a reference used, and the lines they were taken from. */
+class DocumentReferences extends Map<string, LinkDefinition> {
+  readonly used = new Set<string>();
+  /** each definition's line as written, by its index, and the label it defines */
+  readonly lines = new Map<number, { key: string; text: string }>();
+  override get(key: string): LinkDefinition | undefined {
+    const link = super.get(key);
+    if (link !== undefined) this.used.add(key);
+    return link;
+  }
 }
 
 /** The definition `line` is, by its label's `referenceLabel`, or null. */
@@ -648,10 +677,21 @@ function linkDefinition(line: string): { key: string; link: LinkDefinition } | n
  * document reads its own.
  */
 export function parseMarkdown(source: string, depth = 0, html = false, visualizations = false, references?: LinkReferences): MarkdownBlock[] {
+  const lines = source.replace(/\r\n?/g, "\n").split("\n");
+  if (references !== undefined) return readBlocks(lines, depth, html, visualizations, references);
+  const definitions = takeDefinitions(lines, html);
+  const blocks = readBlocks(lines, depth, html, visualizations, definitions);
+  if (definitions.used.size === definitions.size) return blocks;
+  // a definition no reference used is the text it was written as, unlike CommonMark, which hides it:
+  // a list of sources (`[1]: https://a.dev`) that nothing cites keeps its addresses
+  for (const [index, { key, text }] of definitions.lines) if (!definitions.used.has(key)) lines[index] = text;
+  return readBlocks(lines, depth, html, visualizations, new Map([...definitions].filter(([key]) => definitions.used.has(key))));
+}
+
+/** The blocks of `lines`, whose references link by `definitions`. */
+function readBlocks(lines: string[], depth: number, html: boolean, visualizations: boolean, definitions: LinkReferences): MarkdownBlock[] {
   // `visualizations`: a Codex visualization reference on its own line is a block (shared/visualization.ts). Only a
   // chat answer asks for it; everywhere else the line stays the text it is
-  const lines = source.replace(/\r\n?/g, "\n").split("\n");
-  const definitions = references ?? takeDefinitions(lines);
   const blocks: MarkdownBlock[] = [];
   let index = 0;
   // no formula opened before this line closes: the search that found so is not made again (one
@@ -743,7 +783,7 @@ export function parseMarkdown(source: string, depth = 0, html = false, visualiza
       while (index < lines.length && /^\s*>/.test(lineAt(lines, index))) quoted.push(lineAt(lines, index++).replace(/^\s*>\s?/, ""));
       // a line of thousands of ">" (text nobody wrote by hand) would otherwise overflow the stack
       blocks.push({ type: "blockquote", blocks: depth < MAX_QUOTE_DEPTH ? parseMarkdown(quoted.join("\n"), depth + 1, html, visualizations, definitions)
-        : [{ type: "paragraph", lines: quoted.map((quotedLine) => parseInline(quotedLine, true, 0, definitions)) }] });
+        : [{ type: "paragraph", lines: quoted.map((quotedLine) => textLine(quotedLine, definitions)) }] });
       continue;
     }
 
@@ -763,7 +803,7 @@ export function parseMarkdown(source: string, depth = 0, html = false, visualiza
 
     const paragraph: InlineNode[][] = [];
     while (index < lines.length && lineAt(lines, index).trim() !== "" && (paragraph.length === 0 || !startsBlock(lines, index, html, visualizations))) {
-      paragraph.push(parseInline(lineAt(lines, index), true, 0, definitions));
+      paragraph.push(textLine(lineAt(lines, index), definitions));
       index += 1;
     }
     blocks.push({ type: "paragraph", lines: paragraph });

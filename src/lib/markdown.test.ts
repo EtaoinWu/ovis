@@ -2,7 +2,7 @@ import { describe, expect, it, spyOn } from "bun:test";
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { loadKatex, Markdown } from "../components/Markdown.tsx";
+import { loadKatex, Markdown, ProgressiveMarkdown } from "../components/Markdown.tsx";
 import { FILE_LINK_COUNT, FILE_LINK_LIMIT, linkFilePaths } from "../components/FilePathLink.tsx";
 import { HighlightedCode } from "../components/HighlightedCode.tsx";
 import { OpenFileContext } from "./filePaths.ts";
@@ -322,7 +322,8 @@ describe("inline markdown", () => {
       [{ type: "text", value: "This is a " }, { type: "link", href: "https://www.google.com", children: [{ type: "text", value: "reference link" }] }, { type: "text", value: "." }],
       [{ type: "text", value: "This is another " }, { type: "link", href: "https://www.google.com", title: "Google!", children: [{ type: "text", value: "reference link" }] }, { type: "text", value: "." }],
     ] }]);
-    expect(parseMarkdown("[a]: https://a.dev")).toEqual([]);
+    // one nothing refers to is the text it was written as
+    expect(parseMarkdown("[a]: https://a.dev")).toEqual([{ type: "paragraph", lines: [[{ type: "text", value: "[a]: " }, { type: "link", href: "https://a.dev", children: [{ type: "text", value: "https://a.dev" }] }]] }]);
   });
 
   it("reads a reference written in full, collapsed or alone, its label in any case and spacing", () => {
@@ -369,6 +370,53 @@ describe("inline markdown", () => {
       { type: "blockquote", blocks: [{ type: "paragraph", lines: [[{ type: "link", href: "https://a.dev" }]] }] },
       { type: "list", items: [{ content: [{ type: "link", href: "https://a.dev" }] }] },
       { type: "table", header: [[{ type: "link", href: "https://a.dev" }], [{ type: "text", value: "b" }]] },
+    ]);
+  });
+
+  it("keeps a definition nothing refers to as the text it was, in chat and in a file's Preview", () => {
+    const chat = (source: string): string => renderToStaticMarkup(createElement(SettingsProvider, { children: createElement(Markdown, { children: source }) }));
+    const preview = (source: string): string => renderToStaticMarkup(createElement(SettingsProvider, { children: createElement(ProgressiveMarkdown, { blocks: parseMarkdown(source, 0, true) }) }));
+    const languages = Object.getOwnPropertyDescriptor(navigator, "languages");
+    Object.defineProperty(navigator, "languages", { configurable: true, value: ["en"] });
+    try {
+      for (const draw of [chat, preview]) {
+        // nothing cites [1]: its line shows, its address a link, as before definitions were read
+        expect(draw("Sources:\n\n[1]: https://a.dev")).toContain('<span>[1]: </span><a href="https://a.dev" target="_blank" rel="noopener noreferrer"><span>https://a.dev</span></a>');
+        // cited, [1] links and its definition draws nothing; [2], cited nowhere, stays
+        const cited = draw("See [1].\n\n[1]: https://a.dev\n[2]: https://b.dev");
+        expect(cited).toContain('<a href="https://a.dev" target="_blank" rel="noopener noreferrer"><span>1</span></a>');
+        expect(cited).not.toContain("[1]:");
+        expect(cited).toContain("<span>[2]: </span>");
+      }
+    } finally {
+      if (languages) Object.defineProperty(navigator, "languages", languages);
+      else Reflect.deleteProperty(navigator, "languages");
+    }
+  });
+
+  it("draws a definition it does not take as the text it was, linking to no other definition of its label", () => {
+    const outer: InlineNode = { type: "link", href: "https://outer.example", children: [{ type: "text", value: "docs" }] };
+    const written = (address: string): InlineNode[] => [{ type: "text", value: "[docs]: " }, { type: "link", href: address, children: [{ type: "text", value: address }] }];
+    expect(parseMarkdown("> [docs]\n>\n> [docs]: https://quote.example\n\n[docs]: https://outer.example")).toEqual([{ type: "blockquote", blocks: [
+      { type: "paragraph", lines: [[outer]] }, { type: "paragraph", lines: [written("https://quote.example")] },
+    ] }]);
+    expect(parseMarkdown("- [docs]: https://item.example\n\n[docs]\n\n[docs]: https://outer.example")).toEqual([
+      { type: "list", ordered: false, items: [{ content: written("https://item.example") }] }, { type: "paragraph", lines: [[outer]] },
+    ]);
+  });
+
+  it("reads no definition and no fence inside a file's HTML block", () => {
+    // a definition commented out defines nothing: the one after the comment does
+    expect(parseMarkdown("<!--\n\n[docs]: https://wrong.example\n\n-->\n\n[docs]: https://right.example\n\n[docs]", 0, true)).toEqual([
+      { type: "paragraph", lines: [[{ type: "link", href: "https://right.example", children: [{ type: "text", value: "docs" }] }]] },
+    ]);
+    // a ``` in an HTML block opens no fence, so the code block after it keeps every line, and nothing is defined
+    expect(parseMarkdown("<div>\n```\n</div>\n\nx\n\n```\ncode line\n\n[a]: https://a.dev\n```\n\n[a]", 0, true).slice(-2)).toEqual([
+      { type: "code", language: "", value: "code line\n\n[a]: https://a.dev" }, { type: "paragraph", lines: [[{ type: "text", value: "[a]" }]] },
+    ]);
+    // a tag indented in a list item is the item's text, and the ``` after it a fence
+    expect(parseMarkdown("- a\n  <div>\n  ```\n  code\n\n  [a]: https://a.dev\n  ```\n\n[a]", 0, true).slice(-2)).toEqual([
+      { type: "code", language: "", value: "code\n\n[a]: https://a.dev" }, { type: "paragraph", lines: [[{ type: "text", value: "[a]" }]] },
     ]);
   });
 
@@ -750,7 +798,8 @@ describe("text no one wrote by hand", () => {
       if (/^\d+:\[a\]\(b .*\)$/m.test(marks)) titled += 1;
     }
     expect(titled).toBeGreaterThan(40);
-  });
+    // it counts searches, not time: with titles and references it runs past bun's 5 s on a loaded host
+  }, 20_000);
 
   it("finds the references a plain reading of each bracket finds, and no others", () => {
     const references: LinkReferences = new Map([[referenceLabel("a"), { destination: "https://a.dev" }]]);

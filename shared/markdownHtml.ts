@@ -40,16 +40,21 @@ type Holder = { kind: "link"; href: string | null; file: string | null; children
 
 /** Reads the lines of one HTML block, from `index`, into blocks; `next` is the line after it. */
 export function parseHtmlBlock(lines: readonly string[], index: number): { blocks: MarkdownBlock[]; next: number } {
+  const next = htmlBlockEnd(lines, index);
+  return { blocks: readHtml(lines.slice(index, next).join("\n")), next };
+}
+
+/** The line after the HTML block that starts at `index`. */
+export function htmlBlockEnd(lines: readonly string[], index: number): number {
   let next = index;
-  const body: string[] = [];
   // a comment runs to the line that ends it, blank lines and all, and no further: the heading or
   // the fence on the next line is markdown again; anything else runs to the first blank line
   if (/^ {0,3}<!--/.test(lines[index] ?? "")) {
-    while (next < lines.length) { const line = lines[next++] ?? ""; body.push(line); if (line.includes("-->")) break; }
+    while (next < lines.length) if ((lines[next++] ?? "").includes("-->")) break;
   } else {
-    while (next < lines.length && (lines[next] ?? "").trim() !== "") body.push(lines[next++] ?? "");
+    while (next < lines.length && (lines[next] ?? "").trim() !== "") next += 1;
   }
-  return { blocks: readHtml(body.join("\n")), next };
+  return next;
 }
 
 function readHtml(source: string): MarkdownBlock[] {

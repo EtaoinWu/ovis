@@ -414,6 +414,20 @@ describe("inline markdown", () => {
     expect(parseMarkdown("<div>\n```\n</div>\n\nx\n\n```\ncode line\n\n[a]: https://a.dev\n```\n\n[a]", 0, true).slice(-2)).toEqual([
       { type: "code", language: "", value: "code line\n\n[a]: https://a.dev" }, { type: "paragraph", lines: [[{ type: "text", value: "[a]" }]] },
     ]);
+    // indented up to three spaces, a comment or a tag is still the HTML block the reader reads
+    for (const indent of [" ", "  ", "   "]) {
+      expect(parseMarkdown(`${indent}<!--\n\n[docs]: https://wrong.example\n\n-->\n\n[docs]: https://right.example\n\n[docs]`, 0, true), `${indent.length} spaces`).toEqual([
+        { type: "paragraph", lines: [[{ type: "link", href: "https://right.example", children: [{ type: "text", value: "docs" }] }]] },
+      ]);
+      expect(parseMarkdown(`${indent}<div>\n\`\`\`\n</div>\n\nx\n\n\`\`\`\ncode line\n\n[a]: https://a.dev\n\`\`\`\n\n[a]`, 0, true).slice(-2), `${indent.length} spaces`).toEqual([
+        { type: "code", language: "", value: "code line\n\n[a]: https://a.dev" }, { type: "paragraph", lines: [[{ type: "text", value: "[a]" }]] },
+      ]);
+    }
+    // four spaces make no comment, as on main: the opener is text, and the first definition is the one
+    expect(parseMarkdown("    <!--\n\n[docs]: https://wrong.example\n\n-->\n\n[docs]: https://right.example\n\n[docs]", 0, true)).toEqual([
+      { type: "paragraph", lines: [[{ type: "text", value: "    <!--" }]] }, { type: "paragraph", lines: [[{ type: "text", value: "-->" }]] },
+      { type: "paragraph", lines: [[{ type: "link", href: "https://wrong.example", children: [{ type: "text", value: "docs" }] }]] },
+    ]);
     // a tag indented in a list item is the item's text, and the ``` after it a fence
     expect(parseMarkdown("- a\n  <div>\n  ```\n  code\n\n  [a]: https://a.dev\n  ```\n\n[a]", 0, true).slice(-2)).toEqual([
       { type: "code", language: "", value: "code\n\n[a]: https://a.dev" }, { type: "paragraph", lines: [[{ type: "text", value: "[a]" }]] },

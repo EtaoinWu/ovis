@@ -409,6 +409,8 @@ export function parseInline(source: string, links = true, depth = 0, references?
 // `s`: the text may hold a line separator (U+2028) that `.` would stop at, and the pattern then
 // tries every split of the spaces before it; with it the line is an item, as it reads
 const listLine = /^(\s*)([-*]|\d+\.)\s+(.+)$/s;
+/** A thematic break (`---`, `* * *`), which is read before a list item it also looks like. */
+const ruleLine = /^(?:\s*[-*_]){3,}\s*$/;
 /**
  * The line under a table's header: two or more cells of dashes (`---`, `:-:`; one dash is enough, as on GitHub), with or without
  * the outer pipes. Read cell by cell: one pattern for the whole line tries every way to share
@@ -448,7 +450,7 @@ function parseTable(lines: string[], start: number, within = 0, references?: Lin
 
 function startsBlock(lines: string[], index: number, html = false, visualizations = false): boolean {
   const line = lines[index] ?? "";
-  return (visualizations && visualizationReference(line) !== null) || (html && startsHtml(line)) || /^\s*(?:\\\[|\$\$)/.test(line) || /^\s{0,3}```/.test(line) || /^#{1,6}\s+/.test(line) || /^\s*>/.test(line) || /^(?:\s*[-*_]){3,}\s*$/.test(line) || listLine.test(line)
+  return (visualizations && visualizationReference(line) !== null) || (html && startsHtml(line)) || /^\s*(?:\\\[|\$\$)/.test(line) || /^\s{0,3}```/.test(line) || /^#{1,6}\s+/.test(line) || /^\s*>/.test(line) || ruleLine.test(line) || listLine.test(line)
     || startsTable(lines, index);
 }
 
@@ -623,6 +625,7 @@ function takeDefinitions(lines: string[], html: boolean): DocumentReferences {
   const references = new DocumentReferences();
   let fenced = false;
   let starts = true;
+  let listEnd = 0;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]!;
     if (fenced) {
@@ -630,12 +633,15 @@ function takeDefinitions(lines: string[], html: boolean): DocumentReferences {
       continue;
     }
     if (/^ {0,3}```/.test(line)) { fenced = true; continue; }
-    // the lines of an HTML block are its own, a ``` among them too; one indented two spaces may be a
-    // list item's text instead, which the reader reads on as text, so its lines are read as any others
-    if (html && startsHtml(line) && !line.startsWith("  ")) {
-      index = htmlBlockEnd(lines, index) - 1;
-      starts = true;
-      continue;
+    // the lines of an HTML block are its own, a ``` among them too, wherever the reader reads one: not in a
+    // list, whose items read a tag on as their text (parseList says where the list ends)
+    if (html && index >= listEnd) {
+      if (startsHtml(line)) {
+        index = htmlBlockEnd(lines, index) - 1;
+        starts = true;
+        continue;
+      }
+      if (listLine.test(line) && !ruleLine.test(line)) listEnd = parseList(lines, index).next;
     }
     if (line.trim() === "") { starts = true; continue; }
     // after any other line, a line goes on from what that one began (a paragraph, an item) until a blank one
@@ -772,7 +778,7 @@ function readBlocks(lines: string[], depth: number, html: boolean, visualization
       continue;
     }
 
-    if (/^(?:\s*[-*_]){3,}\s*$/.test(line)) {
+    if (ruleLine.test(line)) {
       blocks.push({ type: "hr" });
       index += 1;
       continue;

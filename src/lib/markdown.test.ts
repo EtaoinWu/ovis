@@ -7,7 +7,7 @@ import { FILE_LINK_COUNT, FILE_LINK_LIMIT, linkFilePaths } from "../components/F
 import { HighlightedCode } from "../components/HighlightedCode.tsx";
 import { OpenFileContext } from "./filePaths.ts";
 import { SettingsProvider } from "./settings.ts";
-import { FOLD_CODE_AFTER_LINES, FOLD_OUTPUT_CHARS, FOLDED_CODE_LINES, foldCode, foldToolOutput, inlineMarks, isTableSeparator, mathNestsTooDeep, parseInline, parseMarkdown, safeMarkdownHref, shownText, trimUrl, type InlineNode, type ListBlock, markdownFileTarget } from "../../shared/markdown.ts";
+import { FOLD_CODE_AFTER_LINES, FOLD_OUTPUT_CHARS, FOLDED_CODE_LINES, foldCode, foldToolOutput, inlineMarks, isTableSeparator, mathNestsTooDeep, parseInline, parseMarkdown, referenceLabel, safeMarkdownHref, shownText, trimUrl, type InlineNode, type LinkReferences, type ListBlock, markdownFileTarget } from "../../shared/markdown.ts";
 
 describe("parseMarkdown", () => {
   it("renders inline and display math while leaving fenced code untouched", async () => {
@@ -271,6 +271,105 @@ describe("inline markdown", () => {
     // a bare domain in prose stays prose, and a code span keeps its address as code (rendered as a link)
     expect(parseInline("example.com is fine")).toEqual([{ type: "text", value: "example.com is fine" }]);
     expect(parseInline("`https://example.com/x`")).toEqual([{ type: "code", value: "https://example.com/x" }]);
+  });
+
+  it("reads a link's title, in quotes or parentheses, after its address (#3987)", () => {
+    expect(parseInline('This is a [link with title](https://www.google.com "Click to go to google").')).toEqual([
+      { type: "text", value: "This is a " },
+      { type: "link", href: "https://www.google.com", title: "Click to go to google", children: [{ type: "text", value: "link with title" }] },
+      { type: "text", value: "." },
+    ]);
+    expect(parseInline("[a](https://a.dev 'single') [b](https://b.dev \t(parens))")).toEqual([
+      { type: "link", href: "https://a.dev", title: "single", children: [{ type: "text", value: "a" }] },
+      { type: "text", value: " " },
+      { type: "link", href: "https://b.dev", title: "parens", children: [{ type: "text", value: "b" }] },
+    ]);
+    // a link written in the title is the title's text, and an empty title is none
+    expect(parseInline('[a](https://a.dev "see [b](https://b.dev)")')).toEqual([
+      { type: "link", href: "https://a.dev", title: "see [b](https://b.dev)", children: [{ type: "text", value: "a" }] },
+    ]);
+    expect(parseInline('[a](https://a.dev "")')).toEqual([{ type: "link", href: "https://a.dev", children: [{ type: "text", value: "a" }] }]);
+    // a file link and an image read their address the same way
+    expect(parseInline('[report](out/REPORT.md "the report")')).toEqual([{ type: "file", path: "out/REPORT.md", children: [{ type: "text", value: "report" }] }]);
+    expect(parseInline('![chart](img/a.png "Q3")')[0]).toMatchObject({ type: "image", alt: "chart", src: "img/a.png" });
+    // a title that never closes, or anything after it, makes no link of the bracket
+    for (const line of ['[a](https://a.dev "open)', '[a](https://a.dev "t" x)', "[a](https://a.dev (t)x)", '[a](https://a.dev\n"t")', '[a](https://a.dev "t\nu")', "[a](https://a.dev (t\n))"]) {
+      expect(parseInline(line).filter((node) => node.type === "link"), line).toEqual([{ type: "link", href: "https://a.dev", children: [{ type: "text", value: "https://a.dev" }] }]);
+    }
+  });
+
+  it("shows a link's title when the pointer rests on it", () => {
+    const languages = Object.getOwnPropertyDescriptor(navigator, "languages");
+    Object.defineProperty(navigator, "languages", { configurable: true, value: ["en"] });
+    try {
+      const html = renderToStaticMarkup(createElement(SettingsProvider, { children: createElement(Markdown, { children: '[docs](https://docs.dev "Read the docs") [plain](https://plain.dev)' }) }));
+      expect(html).toContain('<a href="https://docs.dev" target="_blank" rel="noopener noreferrer" title="Read the docs"><span>docs</span></a>');
+      expect(html).toContain('<a href="https://plain.dev" target="_blank" rel="noopener noreferrer"><span>plain</span></a>');
+    } finally {
+      if (languages) Object.defineProperty(navigator, "languages", languages);
+      else Reflect.deleteProperty(navigator, "languages");
+    }
+  });
+
+  it("links a reference to its definition, which draws nothing (#3987)", () => {
+    expect(parseMarkdown([
+      "This is a [reference link][1].",
+      "This is another [reference link][link-name].",
+      "",
+      "[1]: https://www.google.com",
+      '[link-name]: https://www.google.com "Google!"',
+    ].join("\n"))).toEqual([{ type: "paragraph", lines: [
+      [{ type: "text", value: "This is a " }, { type: "link", href: "https://www.google.com", children: [{ type: "text", value: "reference link" }] }, { type: "text", value: "." }],
+      [{ type: "text", value: "This is another " }, { type: "link", href: "https://www.google.com", title: "Google!", children: [{ type: "text", value: "reference link" }] }, { type: "text", value: "." }],
+    ] }]);
+    expect(parseMarkdown("[a]: https://a.dev")).toEqual([]);
+  });
+
+  it("reads a reference written in full, collapsed or alone, its label in any case and spacing", () => {
+    const definitions = ["", "[Docs]: https://docs.dev 'The docs'", "[the  guide]: docs/guide.md", "[x]: <https://x.dev/a>", "[logo]: img/logo.png (Logo)", "[docs]: https://other.dev"].join("\n");
+    const line = (text: string): InlineNode[] => {
+      const [block] = parseMarkdown(`${text}\n${definitions}`);
+      return block?.type === "paragraph" && block.lines.length === 1 ? block.lines[0]! : [];
+    };
+    const docs = (label: string): InlineNode => ({ type: "link", href: "https://docs.dev", title: "The docs", children: [{ type: "text", value: label }] });
+    expect(line("read [the docs][DOCS]")).toEqual([{ type: "text", value: "read " }, docs("the docs")]);
+    expect(line("[docs][] and [dOcS]")).toEqual([docs("docs"), { type: "text", value: " and " }, docs("dOcS")]);
+    expect(line("[The Guide]")).toEqual([{ type: "file", path: "docs/guide.md", children: [{ type: "text", value: "The Guide" }] }]);
+    expect(line("[it][ The\tguide ]")).toMatchObject([{ type: "file", path: "docs/guide.md" }]);
+    expect(line("[x]")).toEqual([{ type: "link", href: "https://x.dev/a", children: [{ type: "text", value: "x" }] }]);
+    expect(line("**see [docs]**")).toEqual([{ type: "strong", children: [{ type: "text", value: "see " }, docs("docs")] }]);
+    expect(line("![the logo][logo]")[0]).toMatchObject({ type: "image", alt: "the logo", src: "img/logo.png" });
+    // an inline link comes first, and what follows a reference that is not one stays text
+    expect(line("[docs](https://inline.dev) [docs](not a link)")).toEqual([
+      { type: "link", href: "https://inline.dev", children: [{ type: "text", value: "docs" }] },
+      { type: "text", value: " " }, docs("docs"), { type: "text", value: "(not a link)" },
+    ]);
+    // a label nothing defines is text, and so is a defined one with such a label after it
+    for (const text of ["[nothing][missing]", "[docs][missing]", "[missing][]", "[missing]"]) expect(line(text), text).toEqual([{ type: "text", value: text }]);
+    expect(line("[[docs]]x")).toEqual([{ type: "text", value: "[" }, docs("docs"), { type: "text", value: "]x" }]);
+  });
+
+  it("defines a reference only where a block may start, outside code, and never a footnote", () => {
+    const texts = (blocks: ReturnType<typeof parseMarkdown>): string[] => blocks.map((block) => block.type === "paragraph" ? block.lines.map((line) => shownText(line)).join("\n")
+      : block.type === "code" ? `code: ${block.value}` : block.type);
+    // a fenced example of a definition stays the code it is
+    expect(texts(parseMarkdown("```md\n[a]: https://a.dev\n```\n\n[a]"))).toEqual(["code: [a]: https://a.dev", "[a]"]);
+    // a definition cannot go on from a paragraph's line, but may follow a fence
+    expect(texts(parseMarkdown("Some text\n[a]: https://a.dev\n\n[a]"))).toEqual(["Some text\n[a]: https://a.dev", "[a]"]);
+    expect(parseMarkdown("```\nx\n```\n[a]: https://a.dev\n[a]")).toMatchObject([{ type: "code" }, { type: "paragraph", lines: [[{ type: "link", href: "https://a.dev" }]] }]);
+    // a footnote is no link, and neither is a line with more after its title
+    expect(texts(parseMarkdown("[^1]\n\n[^1]: https://a.dev"))).toEqual(["[^1]", "[^1]: https://a.dev"]);
+    expect(texts(parseMarkdown('[a]\n\n[a]: https://a.dev "t" more'))).toEqual(["[a]", '[a]: https://a.dev "t" more']);
+    // the first definition of a label is the one, and an unsafe address shows its label alone, as inline
+    expect(parseMarkdown("[a] [b]\n\n[a]: https://one.dev\n[a]: https://two.dev\n[b]: javascript:alert(1)")).toEqual([{ type: "paragraph", lines: [[
+      { type: "link", href: "https://one.dev", children: [{ type: "text", value: "a" }] }, { type: "text", value: " " }, { type: "text", value: "b" },
+    ]] }]);
+    // a quote, a list item and a table cell link by the document's definitions
+    expect(parseMarkdown("> [a]\n\n- [a]\n\n| [a] | b |\n|---|---|\n\n[a]: https://a.dev")).toMatchObject([
+      { type: "blockquote", blocks: [{ type: "paragraph", lines: [[{ type: "link", href: "https://a.dev" }]] }] },
+      { type: "list", items: [{ content: [{ type: "link", href: "https://a.dev" }] }] },
+      { type: "table", header: [[{ type: "link", href: "https://a.dev" }], [{ type: "text", value: "b" }]] },
+    ]);
   });
 
   it("parses inline code, bold, italic, and strikethrough", () => {
@@ -570,6 +669,10 @@ describe("text no one wrote by hand", () => {
     const searches = new Set([
       /[`[<*_~$]|:codex-file-citation\{|\\\(|file:\/\/\/|https?:\/\/|www\./g,
       /\n/g, /}/g, /[\n\r\u2028\u2029]/g, /\\\)/g, /\$/g, /[\]\n]/g, /[\s)]/g,
+      // a link's title, and a bracket inside a reference's label
+      /[^ \t]/g, /["\n]/g, /['\n]/g, /[()\n]/g, /\[/g,
+      // one sticky attempt each, over a reference whose end was found
+      /\[[^\]\n]+\]/y, /\[[^\]\n]+\]\[[^\]\n]*\]/y,
       /_(?![\p{L}\p{N}\p{M}_])/gu,
       /__(?![\p{L}\p{N}\p{M}_])/gu,
       // Only the single-underscore token can succeed in the last fixture; trying the bold
@@ -578,7 +681,7 @@ describe("text no one wrote by hand", () => {
       // one sticky attempt, over a run with no `*` in it
       /\*\*[^*\n]+\*\*/y,
     ].map((pattern) => pattern.toString()));
-    const counted = (text: string): InlineNode[] => {
+    const counted = (text: string, references?: LinkReferences): InlineNode[] => {
       let scanned = 0;
       let unbounded = 0;
       const closer = spyOn(RegExp.prototype, "exec").mockImplementation(function (this: RegExp, input) {
@@ -596,7 +699,7 @@ describe("text no one wrote by hand", () => {
       });
       let nodes: InlineNode[];
       try {
-        nodes = parseInline(text);
+        nodes = parseInline(text, true, 0, references);
       } finally {
         closer.mockRestore();
       }
@@ -615,8 +718,18 @@ describe("text no one wrote by hand", () => {
     // a label closed with an address that is not, and a `__` that only a `_` closes
     for (const count of [4_000, 40_000]) expect(counted("[a](b".repeat(count))).toHaveLength(1);
     for (const count of [3_000, 30_000]) expect(counted("__a b_ ".repeat(count))).toHaveLength(count * 2);
+    // a title that never closes, or closes on no `)`
+    for (const part of ['[a](b "', "[a](b '", "[a](b (", '[a](b  "c"', "[a](b (c)"]) {
+      for (const count of [1_000, 10_000]) expect(counted(part.repeat(count))).toEqual([{ type: "text", value: part.repeat(count) }]);
+    }
+    // references that name nothing defined, in a text that defines one
+    const defined: LinkReferences = new Map([[referenceLabel("defined"), { destination: "https://a.dev" }]]);
+    for (const part of ["[b]", "[b][", "[b][c]", "[b][]", "[[b]", "[b ", "[b][[c]"]) {
+      for (const count of [1_000, 10_000]) expect(counted(part.repeat(count), defined)).toEqual([{ type: "text", value: part.repeat(count) }]);
+    }
+    for (const length of [5_000, 50_000]) expect(counted(`${"[".repeat(length)}defined]`, defined)).toHaveLength(2);
     // the marks are the ones it found as one pattern, searching the whole line
-    const asBefore = /(`[^`\n]+`|\\\(.+?\\\)|\[[^\]\n]+\]\([^\s)]+\)|<https?:\/\/[^\s<>]+>|file:\/\/\/[!#-;=?-_a-~]+|https?:\/\/[!-;=?-~]+|(?<![\w.@/-])www\.[!-;=?-~]+|\*\*[^*\n]+\*\*|(?<![\p{L}\p{N}\p{M}_])__(?=\S)[^\n]*?\S__(?![\p{L}\p{N}\p{M}_])|~~[^~\n]+~~|(?<!\*)\*[^*\n]+\*(?!\*)|(?<![\p{L}\p{N}\p{M}_])_(?=\S)[^\n]*?\S_(?![\p{L}\p{N}\p{M}_]))/gu;
+    const asBefore = /(`[^`\n]+`|\\\(.+?\\\)|\[[^\]\n]+\]\([^\s)]+(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?\)|<https?:\/\/[^\s<>]+>|file:\/\/\/[!#-;=?-_a-~]+|https?:\/\/[!-;=?-~]+|(?<![\w.@/-])www\.[!-;=?-~]+|\*\*[^*\n]+\*\*|(?<![\p{L}\p{N}\p{M}_])__(?=\S)[^\n]*?\S__(?![\p{L}\p{N}\p{M}_])|~~[^~\n]+~~|(?<!\*)\*[^*\n]+\*(?!\*)|(?<![\p{L}\p{N}\p{M}_])_(?=\S)[^\n]*?\S_(?![\p{L}\p{N}\p{M}_]))/gu;
     const found = (marks: Iterable<RegExpMatchArray>): string => [...marks].map((mark) => `${mark.index}:${mark[0]}`).join("\n");
     const lines = everyLine(["_", "a", " ", "[", "](", ")", "\\(", "\\)", "\n"], 5);
     expect(lines.length).toBeGreaterThan(66_000);
@@ -627,6 +740,57 @@ describe("text no one wrote by hand", () => {
       if (marks !== "") marked += 1;
     }
     expect(marked).toBeGreaterThan(1000);
+    // and so are a link's titles
+    let titled = 0;
+    const titles = everyLine(["[a](b", " ", '"', "'", "(", ")"], 6);
+    expect(titles.length).toBeGreaterThan(55_000);
+    for (const line of titles) {
+      const marks = found(inlineMarks(line));
+      expect(`${line}: ${marks}`).toBe(`${line}: ${found(line.matchAll(asBefore))}`);
+      if (/^\d+:\[a\]\(b .*\)$/m.test(marks)) titled += 1;
+    }
+    expect(titled).toBeGreaterThan(40);
+  });
+
+  it("finds the references a plain reading of each bracket finds, and no others", () => {
+    const references: LinkReferences = new Map([[referenceLabel("a"), { destination: "https://a.dev" }]]);
+    const link = /\[[^\]\n]+\]\([^\s)]+(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?\)/y;
+    const known = (label: string): boolean => references.has(referenceLabel(label));
+    // CommonMark's reading: an inline link first, then `[text][label]`, `[text][]` or `[text]`, where a
+    // label after the text, defined or not, leaves the text no shortcut
+    const plainly = (line: string): string => {
+      const marks: string[] = [];
+      for (let at = 0; at < line.length;) {
+        link.lastIndex = at;
+        let token = line[at] === "[" ? link.exec(line)?.[0] ?? null : null;
+        const text = token === null ? /^\[([^[\]\n]+)\]/.exec(line.slice(at)) : null;
+        if (text !== null) {
+          const label = /^\[([^[\]\n]*)\]/.exec(line.slice(at + text[0].length));
+          if (label === null) token = known(text[1]!) ? text[0] : null;
+          else token = known(label[1] || text[1]!) ? text[0] + label[0] : null;
+        }
+        if (token === null) { at += 1; continue; }
+        marks.push(`${at}:${token}`);
+        at += token.length;
+      }
+      return marks.join("\n");
+    };
+    const lines = everyLine(["[", "a", "c", "]", "][", "](", " ", ")", "\n"], 5);
+    expect(lines.length).toBeGreaterThan(66_000);
+    let linked = 0;
+    for (const line of lines) {
+      const marks = [...inlineMarks(line, references)].map((mark) => `${mark.index}:${mark[0]}`).join("\n");
+      expect(`${line}: ${marks}`).toBe(`${line}: ${plainly(line)}`);
+      if (/^\d+:\[[^\]]*\](?:\[|$)/m.test(marks)) linked += 1;
+    }
+    expect(linked).toBeGreaterThan(1000);
+  });
+
+  it("reads definitions and many brackets in linear time", () => {
+    linear((spaces) => `[a]: https://a.dev${" ".repeat(spaces)}x`, 96_000, (text) => parseMarkdown(text));
+    linear((spaces) => `[a]: https://a.dev "t"${" ".repeat(spaces)}x`, 96_000, (text) => parseMarkdown(text));
+    linear((size) => `${"[a] [b][a] [[a]\n".repeat(size / 16)}\n[a]: https://a.dev`, 96_000, (text) => parseMarkdown(text));
+    linear((size) => `${"[".repeat(size)}a]\n\n[a]: https://a.dev`, 200_000, (text) => parseMarkdown(text));
   });
 
   it("reads a line of dollars that never closes in linear time", () => {

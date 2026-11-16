@@ -188,8 +188,8 @@ function codexFileCitation(token: string): { path: string; label: string } | nul
 
 /** Where a link goes as written (an address or a file's path) and its title: an inline link's, or a definition's (`[label]: https://x.dev "title"`). */
 export interface LinkDefinition { destination: string; title?: string }
-/** A document's link reference definitions, by `referenceLabel` of their labels. */
-export type LinkReferences = ReadonlyMap<string, LinkDefinition>;
+/** A document's link reference definitions, by `referenceLabel` of their labels; `use` hears of each label a reference drew a link by. */
+export type LinkReferences = ReadonlyMap<string, LinkDefinition> & { readonly use?: (key: string) => void };
 /** CommonMark's longest link label: past it a bracket is text, which keeps each lookup short. */
 const MAX_LABEL_LENGTH = 999;
 
@@ -388,11 +388,16 @@ export function parseInline(source: string, links = true, depth = 0, references?
       // follows it, a reference's `[` or nothing
       const close = token.indexOf("]");
       const label = token.slice(1, close);
-      const link = token[close + 1] === "(" ? inlineLink(token.slice(close + 2, -1))
-        : references?.get(referenceLabel(token.slice(close + 2, -1) || label));
+      const key = token[close + 1] === "(" ? null : referenceLabel(token.slice(close + 2, -1) || label);
+      const link = key === null ? inlineLink(token.slice(close + 2, -1)) : references?.get(key);
       const shown = link === undefined ? { type: "text" as const, value: token } : linkNode(link, label, depth);
-      if (image && link !== undefined) nodes.push({ type: "image", alt: label, src: link.destination, fallback: [{ type: "text", value: "!" }, shown] });
-      else nodes.push(shown);
+      // a reference whose address draws as no link or file (`ssh://…`) is the text it was written as, and its definition stays too
+      if (key !== null && shown.type === "text") nodes.push({ type: "text", value: image ? `!${token}` : token });
+      else {
+        if (key !== null) references?.use?.(key);
+        if (image && link !== undefined) nodes.push({ type: "image", alt: label, src: link.destination, fallback: [{ type: "text", value: "!" }, shown] });
+        else nodes.push(shown);
+      }
     } else if (token.startsWith("**") || token.startsWith("__")) {
       nodes.push({ type: "strong", children: parseInline(token.slice(2, -2), links, depth + 1, references) });
     } else if (token.startsWith("~~")) {
@@ -616,7 +621,7 @@ const definitionLine = /^ {0,3}\[([^[\]\n]+)\]:[ \t]*(<[^<>\n]*>|[^\s<]\S*)(?:[ 
  * A document's link reference definitions (`[label]: https://x.dev "title"`), the first one of each
  * label: lines that begin one of the document's own paragraphs, as its reader reads them, so none in
  * a quote, a list item, an HTML block or code. A footnote's (`[^1]: …`) is no link's. It notes the
- * labels a reference used; the lines of those in `hidden` draw nothing.
+ * labels a reference drew a link or a file by; the lines of those in `hidden` draw nothing.
  */
 class DocumentReferences extends Map<string, LinkDefinition> {
   readonly used = new Set<string>();
@@ -638,10 +643,8 @@ class DocumentReferences extends Map<string, LinkDefinition> {
     const key = this.lines.get(index);
     return key !== undefined && this.hidden !== null && this.hidden.has(key);
   }
-  override get(key: string): LinkDefinition | undefined {
-    const link = super.get(key);
-    if (link !== undefined) this.used.add(key);
-    return link;
+  use(key: string): void {
+    this.used.add(key);
   }
 }
 

@@ -361,10 +361,11 @@ describe("inline markdown", () => {
     // a footnote is no link, and neither is a line with more after its title
     expect(texts(parseMarkdown("[^1]\n\n[^1]: https://a.dev"))).toEqual(["[^1]", "[^1]: https://a.dev"]);
     expect(texts(parseMarkdown('[a]\n\n[a]: https://a.dev "t" more'))).toEqual(["[a]", '[a]: https://a.dev "t" more']);
-    // the first definition of a label is the one, and an unsafe address shows its label alone, as inline
-    expect(parseMarkdown("[a] [b]\n\n[a]: https://one.dev\n[a]: https://two.dev\n[b]: javascript:alert(1)")).toEqual([{ type: "paragraph", lines: [[
-      { type: "link", href: "https://one.dev", children: [{ type: "text", value: "a" }] }, { type: "text", value: " " }, { type: "text", value: "b" },
-    ]] }]);
+    // the first definition of a label is the one; an unsafe address links nothing, so its reference and its line stay as written
+    expect(parseMarkdown("[a] [b]\n\n[a]: https://one.dev\n[a]: https://two.dev\n[b]: javascript:alert(1)")).toEqual([
+      { type: "paragraph", lines: [[{ type: "link", href: "https://one.dev", children: [{ type: "text", value: "a" }] }, { type: "text", value: " [b]" }]] },
+      { type: "paragraph", lines: [[{ type: "text", value: "[b]: javascript:alert(1)" }]] },
+    ]);
     // a quote, a list item and a table cell link by the document's definitions
     expect(parseMarkdown("> [a]\n\n- [a]\n\n| [a] | b |\n|---|---|\n\n[a]: https://a.dev")).toMatchObject([
       { type: "blockquote", blocks: [{ type: "paragraph", lines: [[{ type: "link", href: "https://a.dev" }]] }] },
@@ -391,6 +392,35 @@ describe("inline markdown", () => {
     } finally {
       if (languages) Object.defineProperty(navigator, "languages", languages);
       else Reflect.deleteProperty(navigator, "languages");
+    }
+  });
+
+  it("hides a definition only when its reference draws a link or a file, in chat and in a file's Preview", () => {
+    const chat = (source: string): string => renderToStaticMarkup(createElement(SettingsProvider, { children: createElement(Markdown, { children: source }) }));
+    const preview = (source: string): string => renderToStaticMarkup(createElement(SettingsProvider, { children: createElement(ProgressiveMarkdown, { blocks: parseMarkdown(source, 0, true) }) }));
+    const languages = Object.getOwnPropertyDescriptor(navigator, "languages");
+    Object.defineProperty(navigator, "languages", { configurable: true, value: ["en"] });
+    try {
+      for (const draw of [chat, preview]) {
+        // an address that draws no link keeps its line, and the reference stays as written
+        for (const [label, address] of [["repo", "ssh://git@host/x.git"], ["call", "tel:+15551234"]] as const) {
+          const drawn = draw(`[${label}]: ${address}\n\nUse [${label}].`);
+          expect(drawn).toContain(`[${label}]: ${address}`);
+          expect(drawn).toContain(`Use [${label}].`);
+          expect(drawn).not.toContain("<a ");
+        }
+        // one that does is consumed, and its reference links
+        const used = draw("[docs]: https://a.dev\n\nRead [docs].");
+        expect(used).toContain('<a href="https://a.dev" target="_blank" rel="noopener noreferrer"><span>docs</span></a>');
+        expect(used).not.toContain("[docs]:");
+      }
+    } finally {
+      if (languages) Object.defineProperty(navigator, "languages", languages);
+      else Reflect.deleteProperty(navigator, "languages");
+    }
+    // a one-word address is a file's path, as an inline link's is: it draws a file and its line is consumed
+    for (const html of [false, true]) {
+      expect(parseMarkdown("[x]: done\n\n[x] Build passes", 0, html)).toEqual([{ type: "paragraph", lines: [[{ type: "file", path: "done", children: [{ type: "text", value: "x" }] }, { type: "text", value: " Build passes" }]] }]);
     }
   });
 

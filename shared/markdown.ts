@@ -9,7 +9,7 @@ export type InlineNode =
   /** `dollar`: written as `$…$`, which a surface that cannot draw it shows again */
   | { type: "math"; value: string; dollar?: true }
   | { type: "strong" | "em" | "del"; children: InlineNode[] }
-  /** `title`: what `[a](https://x.dev "title")`, or the definition a reference names, says of the link */
+  /** `title`: what `[a](https://x.dev "title")` says of the link, shown when the pointer rests on it */
   | { type: "link"; href: string; title?: string; children: InlineNode[] }
   /** `![alt](src)`; `fallback` is what a surface that draws no images shows after the `!` */
   | { type: "image"; alt: string; src: string; fallback: InlineNode[]; /** CSS pixels, from an HTML `<img width>` */ width?: number }
@@ -186,27 +186,17 @@ function codexFileCitation(token: string): { path: string; label: string } | nul
   return label ? { path, label } : null;
 }
 
-/** Where a link goes as written (an address or a file's path) and its title: an inline link's, or a definition's (`[label]: https://x.dev "title"`). */
-export interface LinkDefinition { destination: string; title?: string }
-/** A document's link reference definitions, by `referenceLabel` of their labels; `use` hears of each label a reference drew a link by. */
-export type LinkReferences = ReadonlyMap<string, LinkDefinition> & { readonly use?: (key: string) => void };
-/** CommonMark's longest link label: past it a bracket is text, which keeps each lookup short. */
-const MAX_LABEL_LENGTH = 999;
-
-/** The one key of the labels that name a definition: `[Docs]`, `[docs]` and `[ the\tdocs ]` against `[The Docs]`. */
-export function referenceLabel(label: string): string {
-  return label.trim().replace(/\s+/g, " ").toLowerCase().toUpperCase();
-}
+/** Where an inline link goes as written (an address or a file's path), and its title. */
+interface LinkTarget { destination: string; title?: string }
 
 /**
  * The marks in a line, left to right, as one search of the line for the pattern found them. That
  * search looks from every `[`, `\(` and `_` to the end of the line for what closes it, so a long
  * line of them that never close took a minute. Here the pattern is tried only where a mark can
  * start, and where a closer may be far away, only if one is there: each closer is looked for
- * once, for every opener before it. With `references`, a bracket that names one of them is a mark
- * too (`[text][label]`, `[label][]`, `[label]`), as CommonMark reads it after an inline link.
+ * once, for every opener before it.
  */
-export function* inlineMarks(source: string, references?: LinkReferences): Generator<RegExpExecArray> {
+export function* inlineMarks(source: string): Generator<RegExpExecArray> {
   // Underscores inside identifiers are literal: MAC_QA_CHAT_OK must survive
   // rendering exactly as it appears in the terminal and native transcript.
   // a bare or <angle> http(s) URL is a link too; it stops at the first non-ASCII character,
@@ -218,9 +208,6 @@ export function* inlineMarks(source: string, references?: LinkReferences): Gener
   const emphasis = /_(?=\S)[^\n]*?\S_(?![\p{L}\p{N}\p{M}_])/yu;
   // its bold part alone, for a `*` right after another, where a lone `*` opens nothing
   const strong = /\*\*[^*\n]+\*\*/y;
-  // a reference whose label was found defined: `[label]`, or `[text][label]` and `[label][]`
-  const shortcutReference = /\[[^\]\n]+\]/y;
-  const fullReference = /\[[^\]\n]+\]\[[^\]\n]*\]/y;
   const word = /^[\p{L}\p{N}\p{M}_]$/u;
   // what any part of `marker` starts with
   const opener = /[`[<*_~$]|:codex-file-citation\{|\\\(|file:\/\/\/|https?:\/\/|www\./g;
@@ -257,7 +244,6 @@ export function* inlineMarks(source: string, references?: LinkReferences): Gener
   const doubleQuoteEnd = next(/["\n]/g);
   const singleQuoteEnd = next(/['\n]/g);
   const parenthesisEnd = next(/[()\n]/g);
-  const bracket = next(/\[/g);
   const emphasisClose = next(/_(?![\p{L}\p{N}\p{M}_])/gu, afterNonSpace);
   const strongClose = next(/__(?![\p{L}\p{N}\p{M}_])/gu, afterNonSpace);
   /** Whether what follows the `(` of an inline link closes it: an address, a title or none, then `)`. */
@@ -270,22 +256,6 @@ export function* inlineMarks(source: string, references?: LinkReferences): Gener
     const quote = source[open];
     const close = quote === '"' ? doubleQuoteEnd(open + 1) : quote === "'" ? singleQuoteEnd(open + 1) : quote === "(" ? parenthesisEnd(open + 1) : null;
     return close !== null && source[close] === (quote === "(" ? ")" : quote) && source[close + 1] === ")";
-  };
-  /** Whether the label from `start` to `end` may name a definition: not too long, and with no bracket in it. */
-  const isLabel = (start: number, end: number): boolean => end - start <= MAX_LABEL_LENGTH && !(bracket(start) < end);
-  const defines = (start: number, end: number): boolean => references!.has(referenceLabel(source.slice(start, end)));
-  /**
-   * The pattern of the reference the `[` at `start` opens, its text closed at `close`, or null. Its
-   * text holds no bracket, so no other `[` reads that text again. A label after the text, defined
-   * or not, leaves the text no shortcut; an empty one (`[]`) names the text.
-   */
-  const referenceAt = (start: number, close: number): RegExp | null => {
-    if (!(close > start + 1 && source[close] === "]" && isLabel(start + 1, close))) return null;
-    if (source[close + 1] === "[") {
-      const end = labelEnd(close + 2);
-      if (source[end] === "]" && isLabel(close + 2, end)) return (end === close + 2 ? defines(start + 1, close) : defines(close + 2, end)) ? fullReference : null;
-    }
-    return defines(start + 1, close) ? shortcutReference : null;
   };
   let from = 0;
   for (;;) {
@@ -305,9 +275,7 @@ export function* inlineMarks(source: string, references?: LinkReferences): Gener
       if (/[A-Za-z0-9\\$]/.test(source[start - 1] ?? "") || !(dollarClose(start + 2) < mathBreak(start + 1))) pattern = null;
     } else if (char === "[") {
       const label = labelEnd(start + 1);
-      if (!(label > start + 1 && source[label] === "]" && source[label + 1] === "(" && closesLink(label + 2))) {
-        pattern = references !== undefined && references.size > 0 ? referenceAt(start, label) : null;
-      }
+      if (!(label > start + 1 && source[label] === "]" && source[label + 1] === "(" && closesLink(label + 2))) pattern = null;
     } else if (char === "w") {
       if (/[\w.@/-]/.test(source[start - 1] ?? "")) pattern = null;
     } else if (char === "*") {
@@ -330,29 +298,17 @@ export function* inlineMarks(source: string, references?: LinkReferences): Gener
 }
 
 /** The address and title inside an inline link's parentheses, as `inlineMarks` found them: `https://x.dev "title"`. */
-function inlineLink(inside: string): LinkDefinition {
+function inlineLink(inside: string): LinkTarget {
   const space = inside.search(/\s/);
   return space === -1 ? { destination: inside } : { destination: inside.slice(0, space), title: inside.slice(space).trim().slice(1, -1) };
 }
 
-/** What a link shows: a web link, a file link, or its label alone when its address names neither. */
-function linkNode({ destination, title }: LinkDefinition, label: string, depth: number): InlineNode {
-  // no link nests in a label: only emphasis counts toward the depth
-  const children = parseInline(label, false, depth);
-  const href = safeMarkdownHref(destination) ?? webLikeHref(destination);
-  if (href !== null) return title ? { type: "link", href, title, children } : { type: "link", href, children };
-  return markdownFileNode(destination, children) ?? { type: "text", value: label };
-}
-
-/**
- * Dependency-free inline markdown scanner. Unknown or malformed markup remains text. `references`:
- * the document's link reference definitions (`parseMarkdown` reads them), which its references link to.
- */
-export function parseInline(source: string, links = true, depth = 0, references?: LinkReferences): InlineNode[] {
+/** Dependency-free inline markdown scanner. Unknown or malformed markup remains text. */
+export function parseInline(source: string, links = true, depth = 0): InlineNode[] {
   if (depth > MAX_INLINE_DEPTH) return source === "" ? [] : [{ type: "text", value: source }];
   const nodes: InlineNode[] = [];
   let offset = 0;
-  for (const match of inlineMarks(source, references)) {
+  for (const match of inlineMarks(source)) {
     const index = match.index ?? 0;
     let token = match[0];
     // the `!` of an image stays in the text before its bracket
@@ -384,26 +340,23 @@ export function parseInline(source: string, links = true, depth = 0, references?
     } else if (token.startsWith("$")) {
       nodes.push({ type: "math", value: token.slice(1, -1), dollar: true });
     } else if (token.startsWith("[")) {
-      // a label holds no `]`, so the first one ends it: `[a](x "b]")`; an inline link's `(`
-      // follows it, a reference's `[` or nothing
+      // a label holds no `]`, so the first one ends it (`[a](x "b]")`), and no link nests in one: only
+      // emphasis counts toward the depth
       const close = token.indexOf("]");
       const label = token.slice(1, close);
-      const key = token[close + 1] === "(" ? null : referenceLabel(token.slice(close + 2, -1) || label);
-      const link = key === null ? inlineLink(token.slice(close + 2, -1)) : references?.get(key);
-      const shown = link === undefined ? { type: "text" as const, value: token } : linkNode(link, label, depth);
-      // a reference whose address draws as no link or file (`ssh://…`) is the text it was written as, and its definition stays too
-      if (key !== null && shown.type === "text") nodes.push({ type: "text", value: image ? `!${token}` : token });
-      else {
-        if (key !== null) references?.use?.(key);
-        if (image && link !== undefined) nodes.push({ type: "image", alt: label, src: link.destination, fallback: [{ type: "text", value: "!" }, shown] });
-        else nodes.push(shown);
-      }
+      const { destination: target, title } = inlineLink(token.slice(close + 2, -1));
+      const href = safeMarkdownHref(target) ?? webLikeHref(target);
+      const children = parseInline(label, false, depth);
+      const shown: InlineNode = href !== null ? (title ? { type: "link", href, title, children } : { type: "link", href, children })
+        : markdownFileNode(target, children) ?? { type: "text", value: label };
+      if (image) nodes.push({ type: "image", alt: label, src: target, fallback: [{ type: "text", value: "!" }, shown] });
+      else nodes.push(shown);
     } else if (token.startsWith("**") || token.startsWith("__")) {
-      nodes.push({ type: "strong", children: parseInline(token.slice(2, -2), links, depth + 1, references) });
+      nodes.push({ type: "strong", children: parseInline(token.slice(2, -2), links, depth + 1) });
     } else if (token.startsWith("~~")) {
-      nodes.push({ type: "del", children: parseInline(token.slice(2, -2), links, depth + 1, references) });
+      nodes.push({ type: "del", children: parseInline(token.slice(2, -2), links, depth + 1) });
     } else {
-      nodes.push({ type: "em", children: parseInline(token.slice(1, -1), links, depth + 1, references) });
+      nodes.push({ type: "em", children: parseInline(token.slice(1, -1), links, depth + 1) });
     }
     offset = index + token.length;
   }
@@ -438,13 +391,13 @@ function startsTable(lines: string[], index: number): boolean {
   return lineAt(lines, index).includes("|") && isTableSeparator(lineAt(lines, index + 1));
 }
 /** A table in a list item (`within` > 0) ends at a line outside the item or at the next item. */
-function parseTable(lines: string[], start: number, within = 0, references?: LinkReferences): { block: MarkdownBlock; next: number } {
-  const header = cells(lineAt(lines, start)).map((cell) => parseInline(cell, true, 0, references));
+function parseTable(lines: string[], start: number, within = 0): { block: MarkdownBlock; next: number } {
+  const header = cells(lineAt(lines, start)).map((cell) => parseInline(cell));
   let index = start + 2;
   const rows: InlineNode[][][] = [];
   const inItem = (line: string): boolean => within === 0 || ((/^\s*/.exec(line)?.[0].length ?? 0) >= within && !listLine.test(line));
   while (index < lines.length && lineAt(lines, index).includes("|") && lineAt(lines, index).trim() !== "" && inItem(lineAt(lines, index))) {
-    rows.push(cells(lineAt(lines, index)).map((cell) => parseInline(cell, true, 0, references)));
+    rows.push(cells(lineAt(lines, index)).map((cell) => parseInline(cell)));
     index += 1;
   }
   return { block: { type: "table", header, rows }, next: index };
@@ -458,21 +411,13 @@ function startsBlock(lines: string[], index: number, html = false, visualization
 }
 
 /** An item's text, with a GitHub task box (`[x]`, `[X]`, `[ ]`) read off its start. */
-function listItem(text: string, references?: LinkReferences): ListItem {
+function listItem(text: string): ListItem {
   const task = /^\[([ xX])\](?:\s+(.*))?$/.exec(text);
-  if (task === null) return { content: textLine(text, references) };
-  return { content: textLine(task[2] ?? "", references), checked: task[1] !== " " };
+  if (task === null) return { content: parseInline(text) };
+  return { content: parseInline(task[2] ?? ""), checked: task[1] !== " " };
 }
 
-/**
- * A line of text. One written as a definition that is not taken as one (in a quote or a list item,
- * or after a paragraph's line) is the text it was written as: its label links nowhere.
- */
-function textLine(line: string, references?: LinkReferences): InlineNode[] {
-  return parseInline(line, true, 0, linkDefinition(line) === null ? references : undefined);
-}
-
-function parseList(lines: string[], start: number, visualizations = false, references?: LinkReferences): { block: ListBlock; next: number } {
+function parseList(lines: string[], start: number, visualizations = false): { block: ListBlock; next: number } {
   const first = listLine.exec(lineAt(lines, start));
   if (first === null) return { block: { type: "list", ordered: false, items: [] }, next: start + 1 };
   const baseIndent = (first[1] ?? "").length;
@@ -497,7 +442,7 @@ function parseList(lines: string[], start: number, visualizations = false, refer
       if (sibling !== null && (sibling[1] ?? "").length >= baseIndent + 2) { index = ahead; continue; }
       if (ahead < lines.length && sibling === null && indent >= baseIndent + 2 && startsTable(lines, ahead)) {
         const item = block.items.at(-1)!;
-        const table = parseTable(lines, ahead, baseIndent + 2, references);
+        const table = parseTable(lines, ahead, baseIndent + 2);
         (item.blocks ??= []).push(table.block);
         index = table.next;
         continue;
@@ -516,13 +461,13 @@ function parseList(lines: string[], start: number, visualizations = false, refer
         if (last === undefined) {
           // added to, not copied: an item of thousands of lines copies itself at every one
           item.content.push({ type: "text", value: " " });
-          for (const node of textLine(line.trim(), references)) item.content.push(node);
+          for (const node of parseInline(line.trim())) item.content.push(node);
         } else {
           // after a table or nested list the item's text goes on below it; a quote or rule
           // there ends the list and shows as its own block, as it did before tables nested
           if (startsBlock(lines, ahead, false, visualizations)) break;
-          if (last.type === "paragraph" && ahead === index) last.lines.push(textLine(line.trim(), references));
-          else item.blocks!.push({ type: "paragraph", lines: [textLine(line.trim(), references)] });
+          if (last.type === "paragraph" && ahead === index) last.lines.push(parseInline(line.trim()));
+          else item.blocks!.push({ type: "paragraph", lines: [parseInline(line.trim())] });
         }
         index = ahead + 1;
         continue;
@@ -534,13 +479,13 @@ function parseList(lines: string[], start: number, visualizations = false, refer
     if ((match[1] ?? "").length >= baseIndent + 2) {
       const parent = block.items.at(-1);
       if (parent === undefined) break;
-      const nested = parseList(lines, index, visualizations, references);
+      const nested = parseList(lines, index, visualizations);
       (parent.blocks ??= []).push(nested.block);
       index = nested.next;
       continue;
     }
     if ((match[1] ?? "").length !== baseIndent || /\d/.test(match[2] ?? "") !== ordered) break;
-    block.items.push(listItem(match[3] ?? "", references));
+    block.items.push(listItem(match[3] ?? ""));
     if (ordered) numbers.push(Number.parseInt(match[2] ?? "1", 10));
     index += 1;
   }
@@ -614,78 +559,12 @@ export function foldToolOutput(output: string): { head: string; lines: number | 
 /** Quotes nest by one call each: past this many levels, what is left is read as plain lines. */
 const MAX_QUOTE_DEPTH = 32;
 
-/** A link reference definition alone on its line: its label, its address (`<…>` around one with spaces) and a title. */
-const definitionLine = /^ {0,3}\[([^[\]\n]+)\]:[ \t]*(<[^<>\n]*>|[^\s<]\S*)(?:[ \t]+("[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*$/;
-
-/**
- * A document's link reference definitions (`[label]: https://x.dev "title"`), the first one of each
- * label: lines that begin one of the document's own paragraphs, as its reader reads them, so none in
- * a quote, a list item, an HTML block or code. A footnote's (`[^1]: …`) is no link's. It notes the
- * labels a reference drew a link or a file by; the lines of those in `hidden` draw nothing.
- */
-class DocumentReferences extends Map<string, LinkDefinition> {
-  readonly used = new Set<string>();
-  /** the label each definition's line defines, by its index */
-  readonly lines = new Map<number, string>();
-  /** null while the reader finds the definitions */
-  hidden: ReadonlySet<string> | null = null;
-  /** Whether the line at `index`, which begins one of the document's own paragraphs, is a definition that draws nothing. */
-  takes(index: number, line: string): boolean {
-    if (this.hidden !== null) return this.hides(index);
-    const definition = linkDefinition(line);
-    if (definition === null) return false;
-    if (!this.has(definition.key)) this.set(definition.key, definition.link);
-    this.lines.set(index, definition.key);
-    return true;
-  }
-  /** Whether the line at `index` is a definition that draws nothing. */
-  hides(index: number): boolean {
-    const key = this.lines.get(index);
-    return key !== undefined && this.hidden !== null && this.hidden.has(key);
-  }
-  use(key: string): void {
-    this.used.add(key);
-  }
-}
-
-/** The definition `line` is, by its label's `referenceLabel`, or null. */
-function linkDefinition(line: string): { key: string; link: LinkDefinition } | null {
-  const [, label = "", written = "", quoted] = definitionLine.exec(line) ?? [];
-  const key = referenceLabel(label);
-  if (key === "" || label.startsWith("^") || label.length > MAX_LABEL_LENGTH) return null;
-  const destination = written.startsWith("<") ? written.slice(1, -1) : written;
-  return { key, link: quoted === undefined ? { destination } : { destination, title: quoted.slice(1, -1) } };
-}
-
-/**
- * `html`: a file's markdown, whose HTML blocks are read as markdown (markdownHtml.ts); an agent's text keeps them as text.
- * `references`: the document's link reference definitions, which a quote in it is read with; a
- * document reads its own.
- */
-export function parseMarkdown(source: string, depth = 0, html = false, visualizations = false, references?: LinkReferences): MarkdownBlock[] {
-  const lines = source.replace(/\r\n?/g, "\n").split("\n");
-  if (references !== undefined) return readBlocks(lines, depth, html, visualizations, references);
-  const definitions = new DocumentReferences();
-  // a first reading finds the definitions: only the reader knows where the document's own paragraphs begin
-  if (/^ {0,3}\[[^[\]\n]+\]:/m.test(source)) readBlocks(lines, depth, html, visualizations, definitions);
-  definitions.used.clear();
-  definitions.hidden = new Set(definitions.keys());
-  const blocks = readBlocks(lines, depth, html, visualizations, definitions);
-  if (definitions.used.size === definitions.size) return blocks;
-  // a definition no reference used is the text it was written as, unlike CommonMark, which hides it:
-  // a list of sources (`[1]: https://a.dev`) that nothing cites keeps its addresses
-  definitions.hidden = new Set(definitions.used);
-  for (const key of [...definitions.keys()]) if (!definitions.used.has(key)) definitions.delete(key);
-  return readBlocks(lines, depth, html, visualizations, definitions);
-}
-
-/** The blocks of `lines`, whose references link by `definitions`. */
-function readBlocks(lines: string[], depth: number, html: boolean, visualizations: boolean, definitions: LinkReferences): MarkdownBlock[] {
+/** `html`: a file's markdown, whose HTML blocks are read as markdown (markdownHtml.ts); an agent's text keeps them as text */
+export function parseMarkdown(source: string, depth = 0, html = false, visualizations = false): MarkdownBlock[] {
   // `visualizations`: a Codex visualization reference on its own line is a block (shared/visualization.ts). Only a
   // chat answer asks for it; everywhere else the line stays the text it is
+  const lines = source.replace(/\r\n?/g, "\n").split("\n");
   const blocks: MarkdownBlock[] = [];
-  // the document itself, not a quote in it, whose paragraphs may begin with its definitions
-  const own = depth === 0 && definitions instanceof DocumentReferences ? definitions : null;
   let index = 0;
   // no formula opened before this line closes: the search that found so is not made again (one
   // line per delimiter, `\[` and `$$`)
@@ -760,7 +639,7 @@ function readBlocks(lines: string[], depth: number, html: boolean, visualization
 
     const heading = /^(#{1,6})\s+(.+)$/s.exec(line);
     if (heading !== null) {
-      blocks.push({ type: "heading", level: (heading[1] ?? "#").length as 1 | 2 | 3 | 4 | 5 | 6, content: parseInline(heading[2] ?? "", true, 0, definitions) });
+      blocks.push({ type: "heading", level: (heading[1] ?? "#").length as 1 | 2 | 3 | 4 | 5 | 6, content: parseInline(heading[2] ?? "") });
       index += 1;
       continue;
     }
@@ -775,29 +654,28 @@ function readBlocks(lines: string[], depth: number, html: boolean, visualization
       const quoted: string[] = [];
       while (index < lines.length && /^\s*>/.test(lineAt(lines, index))) quoted.push(lineAt(lines, index++).replace(/^\s*>\s?/, ""));
       // a line of thousands of ">" (text nobody wrote by hand) would otherwise overflow the stack
-      blocks.push({ type: "blockquote", blocks: depth < MAX_QUOTE_DEPTH ? parseMarkdown(quoted.join("\n"), depth + 1, html, visualizations, definitions)
-        : [{ type: "paragraph", lines: quoted.map((quotedLine) => textLine(quotedLine, definitions)) }] });
+      blocks.push({ type: "blockquote", blocks: depth < MAX_QUOTE_DEPTH ? parseMarkdown(quoted.join("\n"), depth + 1, html, visualizations)
+        : [{ type: "paragraph", lines: quoted.map((quotedLine) => parseInline(quotedLine)) }] });
       continue;
     }
 
     if (listLine.test(line)) {
-      const parsed = parseList(lines, index, visualizations, definitions);
+      const parsed = parseList(lines, index, visualizations);
       blocks.push(parsed.block);
       index = parsed.next;
       continue;
     }
 
     if (startsTable(lines, index)) {
-      const table = parseTable(lines, index, 0, definitions);
+      const table = parseTable(lines, index);
       blocks.push(table.block);
       index = table.next;
       continue;
     }
 
-    if (own?.takes(index, line)) { index += 1; continue; }
     const paragraph: InlineNode[][] = [];
-    while (index < lines.length && lineAt(lines, index).trim() !== "" && (paragraph.length === 0 || !startsBlock(lines, index, html, visualizations)) && !own?.hides(index)) {
-      paragraph.push(textLine(lineAt(lines, index), definitions));
+    while (index < lines.length && lineAt(lines, index).trim() !== "" && (paragraph.length === 0 || !startsBlock(lines, index, html, visualizations))) {
+      paragraph.push(parseInline(lineAt(lines, index)));
       index += 1;
     }
     blocks.push({ type: "paragraph", lines: paragraph });

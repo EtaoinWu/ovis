@@ -2,12 +2,12 @@ import { describe, expect, it, spyOn } from "bun:test";
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { loadKatex, Markdown, ProgressiveMarkdown } from "../components/Markdown.tsx";
+import { loadKatex, Markdown } from "../components/Markdown.tsx";
 import { FILE_LINK_COUNT, FILE_LINK_LIMIT, linkFilePaths } from "../components/FilePathLink.tsx";
 import { HighlightedCode } from "../components/HighlightedCode.tsx";
 import { OpenFileContext } from "./filePaths.ts";
 import { SettingsProvider } from "./settings.ts";
-import { FOLD_CODE_AFTER_LINES, FOLD_OUTPUT_CHARS, FOLDED_CODE_LINES, foldCode, foldToolOutput, inlineMarks, isTableSeparator, mathNestsTooDeep, parseInline, parseMarkdown, referenceLabel, safeMarkdownHref, shownText, trimUrl, type InlineNode, type LinkReferences, type ListBlock, markdownFileTarget } from "../../shared/markdown.ts";
+import { FOLD_CODE_AFTER_LINES, FOLD_OUTPUT_CHARS, FOLDED_CODE_LINES, foldCode, foldToolOutput, inlineMarks, isTableSeparator, mathNestsTooDeep, parseInline, parseMarkdown, safeMarkdownHref, shownText, trimUrl, type InlineNode, type ListBlock, type MarkdownBlock, markdownFileTarget } from "../../shared/markdown.ts";
 
 describe("parseMarkdown", () => {
   it("renders inline and display math while leaving fenced code untouched", async () => {
@@ -311,177 +311,49 @@ describe("inline markdown", () => {
     }
   });
 
-  it("links a reference to its definition, which draws nothing (#3987)", () => {
-    expect(parseMarkdown([
-      "This is a [reference link][1].",
-      "This is another [reference link][link-name].",
-      "",
-      "[1]: https://www.google.com",
-      '[link-name]: https://www.google.com "Google!"',
-    ].join("\n"))).toEqual([{ type: "paragraph", lines: [
-      [{ type: "text", value: "This is a " }, { type: "link", href: "https://www.google.com", children: [{ type: "text", value: "reference link" }] }, { type: "text", value: "." }],
-      [{ type: "text", value: "This is another " }, { type: "link", href: "https://www.google.com", title: "Google!", children: [{ type: "text", value: "reference link" }] }, { type: "text", value: "." }],
-    ] }]);
-    // one nothing refers to is the text it was written as
-    expect(parseMarkdown("[a]: https://a.dev")).toEqual([{ type: "paragraph", lines: [[{ type: "text", value: "[a]: " }, { type: "link", href: "https://a.dev", children: [{ type: "text", value: "https://a.dev" }] }]] }]);
-  });
-
-  it("reads a reference written in full, collapsed or alone, its label in any case and spacing", () => {
-    const definitions = ["", "[Docs]: https://docs.dev 'The docs'", "[the  guide]: docs/guide.md", "[x]: <https://x.dev/a>", "[logo]: img/logo.png (Logo)", "[docs]: https://other.dev"].join("\n");
-    const line = (text: string): InlineNode[] => {
-      const [block] = parseMarkdown(`${text}\n${definitions}`);
-      return block?.type === "paragraph" && block.lines.length === 1 ? block.lines[0]! : [];
-    };
-    const docs = (label: string): InlineNode => ({ type: "link", href: "https://docs.dev", title: "The docs", children: [{ type: "text", value: label }] });
-    expect(line("read [the docs][DOCS]")).toEqual([{ type: "text", value: "read " }, docs("the docs")]);
-    expect(line("[docs][] and [dOcS]")).toEqual([docs("docs"), { type: "text", value: " and " }, docs("dOcS")]);
-    expect(line("[The Guide]")).toEqual([{ type: "file", path: "docs/guide.md", children: [{ type: "text", value: "The Guide" }] }]);
-    expect(line("[it][ The\tguide ]")).toMatchObject([{ type: "file", path: "docs/guide.md" }]);
-    expect(line("[x]")).toEqual([{ type: "link", href: "https://x.dev/a", children: [{ type: "text", value: "x" }] }]);
-    expect(line("**see [docs]**")).toEqual([{ type: "strong", children: [{ type: "text", value: "see " }, docs("docs")] }]);
-    expect(line("![the logo][logo]")[0]).toMatchObject({ type: "image", alt: "the logo", src: "img/logo.png" });
-    // an inline link comes first, and what follows a reference that is not one stays text
-    expect(line("[docs](https://inline.dev) [docs](not a link)")).toEqual([
-      { type: "link", href: "https://inline.dev", children: [{ type: "text", value: "docs" }] },
-      { type: "text", value: " " }, docs("docs"), { type: "text", value: "(not a link)" },
-    ]);
-    // a label nothing defines is text, and so is a defined one with such a label after it
-    for (const text of ["[nothing][missing]", "[docs][missing]", "[missing][]", "[missing]"]) expect(line(text), text).toEqual([{ type: "text", value: text }]);
-    expect(line("[[docs]]x")).toEqual([{ type: "text", value: "[" }, docs("docs"), { type: "text", value: "]x" }]);
-  });
-
-  it("defines a reference only where a block may start, outside code, and never a footnote", () => {
-    const texts = (blocks: ReturnType<typeof parseMarkdown>): string[] => blocks.map((block) => block.type === "paragraph" ? block.lines.map((line) => shownText(line)).join("\n")
-      : block.type === "code" ? `code: ${block.value}` : block.type);
-    // a fenced example of a definition stays the code it is
-    expect(texts(parseMarkdown("```md\n[a]: https://a.dev\n```\n\n[a]"))).toEqual(["code: [a]: https://a.dev", "[a]"]);
-    // a definition cannot go on from a paragraph's line, but may follow a fence
-    expect(texts(parseMarkdown("Some text\n[a]: https://a.dev\n\n[a]"))).toEqual(["Some text\n[a]: https://a.dev", "[a]"]);
-    expect(parseMarkdown("```\nx\n```\n[a]: https://a.dev\n[a]")).toMatchObject([{ type: "code" }, { type: "paragraph", lines: [[{ type: "link", href: "https://a.dev" }]] }]);
-    // a footnote is no link, and neither is a line with more after its title
-    expect(texts(parseMarkdown("[^1]\n\n[^1]: https://a.dev"))).toEqual(["[^1]", "[^1]: https://a.dev"]);
-    expect(texts(parseMarkdown('[a]\n\n[a]: https://a.dev "t" more'))).toEqual(["[a]", '[a]: https://a.dev "t" more']);
-    // the first definition of a label is the one; an unsafe address links nothing, so its reference and its line stay as written
-    expect(parseMarkdown("[a] [b]\n\n[a]: https://one.dev\n[a]: https://two.dev\n[b]: javascript:alert(1)")).toEqual([
-      { type: "paragraph", lines: [[{ type: "link", href: "https://one.dev", children: [{ type: "text", value: "a" }] }, { type: "text", value: " [b]" }]] },
-      { type: "paragraph", lines: [[{ type: "text", value: "[b]: javascript:alert(1)" }]] },
-    ]);
-    // a quote, a list item and a table cell link by the document's definitions
-    expect(parseMarkdown("> [a]\n\n- [a]\n\n| [a] | b |\n|---|---|\n\n[a]: https://a.dev")).toMatchObject([
-      { type: "blockquote", blocks: [{ type: "paragraph", lines: [[{ type: "link", href: "https://a.dev" }]] }] },
-      { type: "list", items: [{ content: [{ type: "link", href: "https://a.dev" }] }] },
-      { type: "table", header: [[{ type: "link", href: "https://a.dev" }], [{ type: "text", value: "b" }]] },
-    ]);
-  });
-
-  it("keeps a definition nothing refers to as the text it was, in chat and in a file's Preview", () => {
-    const chat = (source: string): string => renderToStaticMarkup(createElement(SettingsProvider, { children: createElement(Markdown, { children: source }) }));
-    const preview = (source: string): string => renderToStaticMarkup(createElement(SettingsProvider, { children: createElement(ProgressiveMarkdown, { blocks: parseMarkdown(source, 0, true) }) }));
-    const languages = Object.getOwnPropertyDescriptor(navigator, "languages");
-    Object.defineProperty(navigator, "languages", { configurable: true, value: ["en"] });
-    try {
-      for (const draw of [chat, preview]) {
-        // nothing cites [1]: its line shows, its address a link, as before definitions were read
-        expect(draw("Sources:\n\n[1]: https://a.dev")).toContain('<span>[1]: </span><a href="https://a.dev" target="_blank" rel="noopener noreferrer"><span>https://a.dev</span></a>');
-        // cited, [1] links and its definition draws nothing; [2], cited nowhere, stays
-        const cited = draw("See [1].\n\n[1]: https://a.dev\n[2]: https://b.dev");
-        expect(cited).toContain('<a href="https://a.dev" target="_blank" rel="noopener noreferrer"><span>1</span></a>');
-        expect(cited).not.toContain("[1]:");
-        expect(cited).toContain("<span>[2]: </span>");
+  it("draws a reference-style link and its definition as the text they are, as before, in chat and in a file's Preview", () => {
+    // reference definitions are not read (#3987's second part waits for its own change): each of these draws as on main, the
+    // last ones the inputs a review found a reader of them got wrong
+    const inline = (nodes: InlineNode[]): string => nodes.map((node) => {
+      switch (node.type) {
+        case "text": return node.value;
+        case "code": return `\`${node.value}\``;
+        case "link": return `<${inline(node.children)}→${node.href}>`;
+        case "file": return `{${inline(node.children)}→${node.path}}`;
+        case "image": return `!{${node.alt}→${node.src}}`;
+        case "math": return `$${node.value}$`;
+        default: return `${node.type}(${inline(node.children)})`;
       }
-    } finally {
-      if (languages) Object.defineProperty(navigator, "languages", languages);
-      else Reflect.deleteProperty(navigator, "languages");
-    }
-  });
-
-  it("hides a definition only when its reference draws a link or a file, in chat and in a file's Preview", () => {
-    const chat = (source: string): string => renderToStaticMarkup(createElement(SettingsProvider, { children: createElement(Markdown, { children: source }) }));
-    const preview = (source: string): string => renderToStaticMarkup(createElement(SettingsProvider, { children: createElement(ProgressiveMarkdown, { blocks: parseMarkdown(source, 0, true) }) }));
-    const languages = Object.getOwnPropertyDescriptor(navigator, "languages");
-    Object.defineProperty(navigator, "languages", { configurable: true, value: ["en"] });
-    try {
-      for (const draw of [chat, preview]) {
-        // an address that draws no link keeps its line, and the reference stays as written
-        for (const [label, address] of [["repo", "ssh://git@host/x.git"], ["call", "tel:+15551234"]] as const) {
-          const drawn = draw(`[${label}]: ${address}\n\nUse [${label}].`);
-          expect(drawn).toContain(`[${label}]: ${address}`);
-          expect(drawn).toContain(`Use [${label}].`);
-          expect(drawn).not.toContain("<a ");
-        }
-        // one that does is consumed, and its reference links
-        const used = draw("[docs]: https://a.dev\n\nRead [docs].");
-        expect(used).toContain('<a href="https://a.dev" target="_blank" rel="noopener noreferrer"><span>docs</span></a>');
-        expect(used).not.toContain("[docs]:");
+    }).join("");
+    const shape = (blocks: MarkdownBlock[]): string[] => blocks.map((block) => {
+      switch (block.type) {
+        case "paragraph": return block.lines.map(inline).join("\n");
+        case "heading": return `# ${inline(block.content)}`;
+        case "table": return [block.header, ...block.rows].map((row) => row.map(inline).join(" | ")).join("\n");
+        case "list": return block.items.map((item) => `- ${inline(item.content)}`).join("\n");
+        case "code": return `code: ${block.value}`;
+        default: return block.type;
       }
-    } finally {
-      if (languages) Object.defineProperty(navigator, "languages", languages);
-      else Reflect.deleteProperty(navigator, "languages");
+    });
+    const cases: [string, string, string[], string[]][] = [
+      ["the issue's reference line", "This is a [reference link][1].\n\n[1]: https://www.google.com", ["This is a [reference link][1].","[1]: <https://www.google.com→https://www.google.com>"], ["This is a [reference link][1].","[1]: <https://www.google.com→https://www.google.com>"]],
+      ["full, collapsed and shortcut forms", "[x][r] [r][] [r]\n\n[r]: https://e.com \"T\"", ["[x][r] [r][] [r]","[r]: <https://e.com→https://e.com> \"T\""], ["[x][r] [r][] [r]","[r]: <https://e.com→https://e.com> \"T\""]],
+      ["a list of sources", "Sources:\n\n[1]: https://a.dev", ["Sources:","[1]: <https://a.dev→https://a.dev>"], ["Sources:","[1]: <https://a.dev→https://a.dev>"]],
+      ["a definition in an HTML comment", "<!--\n\n[docs]: https://wrong.example\n\n-->\n\n[docs]: https://right.example\n\n[docs]", ["<!--","[docs]: <https://wrong.example→https://wrong.example>","-->","[docs]: <https://right.example→https://right.example>","[docs]"], ["[docs]: <https://right.example→https://right.example>","[docs]"]],
+      ["only a commented definition", "<!--\n\n[docs]: https://hidden.example\n\n-->\n\nRead [docs].", ["<!--","[docs]: <https://hidden.example→https://hidden.example>","-->","Read [docs]."], ["Read [docs]."]],
+      ["a definition-shaped table cell", "| [r]: https://wrong.example | x |\n|---|---|\n\n[r]: https://right.example\n\n[r]", ["[r]: <https://wrong.example→https://wrong.example> | x","[r]: <https://right.example→https://right.example>","[r]"], ["[r]: <https://wrong.example→https://wrong.example> | x","[r]: <https://right.example→https://right.example>","[r]"]],
+      ["a definition-shaped heading", "# [r]: https://wrong.example\n\n[r]: https://right.example\n\n[r]", ["# [r]: <https://wrong.example→https://wrong.example>","[r]: <https://right.example→https://right.example>","[r]"], ["# [r]: <https://wrong.example→https://wrong.example>","[r]: <https://right.example→https://right.example>","[r]"]],
+      ["a backtick in a label", "[`a]: ssh://h/x\n\n[`a] and [docs] `\n\n[docs]: https://d.dev", ["[`a]: ssh://h/x","[`a] and [docs] `","[docs]: <https://d.dev→https://d.dev>"], ["[`a]: ssh://h/x","[`a] and [docs] `","[docs]: <https://d.dev→https://d.dev>"]],
+      ["a \\( in a label", "[\\(a]: ssh://h/x\n\nsee [\\(a] and [docs] \\) ok\n\n[docs]: https://d.dev", ["[\\(a]: ssh://h/x","see [$a] and [docs] $ ok","[docs]: <https://d.dev→https://d.dev>"], ["[\\(a]: ssh://h/x","see [$a] and [docs] $ ok","[docs]: <https://d.dev→https://d.dev>"]],
+      ["a label defined twice", "[docs]\n\n[docs]: https://good.example\n[docs]: https://other.example", ["[docs]","[docs]: <https://good.example→https://good.example>\n[docs]: <https://other.example→https://other.example>"], ["[docs]","[docs]: <https://good.example→https://good.example>\n[docs]: <https://other.example→https://other.example>"]],
+      ["nested brackets before a label", "[a [b]][r]\n\n[r]: https://example.com", ["[a [b]][r]","[r]: <https://example.com→https://example.com>"], ["[a [b]][r]","[r]: <https://example.com→https://example.com>"]],
+      ["a list item's indented definition", "See [docs].\n\n- Source note\n\n  [docs]: https://wrong.example\n\n[docs]: https://right.example", ["See [docs].","- Source note [docs]: <https://wrong.example→https://wrong.example>","[docs]: <https://right.example→https://right.example>"], ["See [docs].","- Source note [docs]: <https://wrong.example→https://wrong.example>","[docs]: <https://right.example→https://right.example>"]],
+      ["an address that draws no link", "[repo]: ssh://git@host/x.git\n\nClone [repo].", ["[repo]: ssh://git@host/x.git","Clone [repo]."], ["[repo]: ssh://git@host/x.git","Clone [repo]."]],
+    ];
+    for (const [name, source, chat, preview] of cases) {
+      expect(shape(parseMarkdown(source)), `${name}, chat`).toEqual(chat);
+      expect(shape(parseMarkdown(source, 0, true)), `${name}, Preview`).toEqual(preview);
     }
-    // a one-word address is a file's path, as an inline link's is: it draws a file and its line is consumed
-    for (const html of [false, true]) {
-      expect(parseMarkdown("[x]: done\n\n[x] Build passes", 0, html)).toEqual([{ type: "paragraph", lines: [[{ type: "file", path: "done", children: [{ type: "text", value: "x" }] }, { type: "text", value: " Build passes" }]] }]);
-    }
-  });
-
-  it("draws a definition it does not take as the text it was, linking to no other definition of its label", () => {
-    const outer: InlineNode = { type: "link", href: "https://outer.example", children: [{ type: "text", value: "docs" }] };
-    const written = (address: string): InlineNode[] => [{ type: "text", value: "[docs]: " }, { type: "link", href: address, children: [{ type: "text", value: address }] }];
-    expect(parseMarkdown("> [docs]\n>\n> [docs]: https://quote.example\n\n[docs]: https://outer.example")).toEqual([{ type: "blockquote", blocks: [
-      { type: "paragraph", lines: [[outer]] }, { type: "paragraph", lines: [written("https://quote.example")] },
-    ] }]);
-    expect(parseMarkdown("- [docs]: https://item.example\n\n[docs]\n\n[docs]: https://outer.example")).toEqual([
-      { type: "list", ordered: false, items: [{ content: written("https://item.example") }] }, { type: "paragraph", lines: [[outer]] },
-    ]);
-  });
-
-  it("takes a definition only where the document's own paragraph begins, as its reader reads the blocks", () => {
-    const right = (blocks: ReturnType<typeof parseMarkdown>): string[] => blocks.flatMap((block) => block.type === "paragraph" ? block.lines.flat() : [])
-      .flatMap((node) => node.type === "link" && node.children[0]?.type === "text" && node.children[0].value === "docs" ? [node.href] : []);
-    // a list item's indented definition is the item's text, in chat and in a Preview
-    for (const html of [false, true]) {
-      expect(right(parseMarkdown("See [docs].\n\n- Source note\n\n  [docs]: https://wrong.example\n\n[docs]: https://right.example", 0, html))).toEqual(["https://right.example"]);
-    }
-    // a used definition after a list ends the list where the reader ends it: an indented comment after it is still a comment
-    expect(right(parseMarkdown("- a\n\n[x]: https://x.dev\n\n  <!--\n\n[docs]: https://wrong.example\n\n  -->\n\n[docs]: https://right.example\n\n[docs] [x]", 0, true))).toEqual(["https://right.example"]);
-    // and a ``` in that comment opens no fence, so a later code block keeps its lines
-    expect(parseMarkdown("- a\n\n[x]: https://x.dev\n\n  <!--\n  ```\n  -->\n\n[a]: https://a.dev\n\n```\n\n[a] [x]", 0, true).at(-1)).toEqual({ type: "code", language: "", value: "\n[a] [x]" });
-    expect(parseMarkdown("- a\n\n[x]: https://x.dev\n\n  more\n\n[x]")).toMatchObject([{ type: "list", items: [{ content: [{ type: "text", value: "a" }] }] }, { type: "paragraph", lines: [[{ type: "text", value: "  more" }]] }, { type: "paragraph" }]);
-    // a `- ` line in a formula or a table row is no list, so the comment after it is one
-    for (const before of ["$$\n- x\n  $$", "a|b\n-|-\n- x|y", "  - a\n", "- a\n  ```\n  x\n  ```"]) {
-      expect(right(parseMarkdown(`${before}\n  <!--\n\n[docs]: https://wrong.example\n\n-->\n\n[docs]: https://right.example\n\n[docs]`, 0, true)), before).toEqual(["https://right.example"]);
-    }
-    // a heading is a block of its own, so a definition may follow it
-    expect(right(parseMarkdown("# Guide\n[docs]: https://right.example\n\n[docs]"))).toEqual(["https://right.example"]);
-  });
-
-  it("reads no definition and no fence inside a file's HTML block", () => {
-    // a definition commented out defines nothing: the one after the comment does
-    expect(parseMarkdown("<!--\n\n[docs]: https://wrong.example\n\n-->\n\n[docs]: https://right.example\n\n[docs]", 0, true)).toEqual([
-      { type: "paragraph", lines: [[{ type: "link", href: "https://right.example", children: [{ type: "text", value: "docs" }] }]] },
-    ]);
-    // a ``` in an HTML block opens no fence, so the code block after it keeps every line, and nothing is defined
-    expect(parseMarkdown("<div>\n```\n</div>\n\nx\n\n```\ncode line\n\n[a]: https://a.dev\n```\n\n[a]", 0, true).slice(-2)).toEqual([
-      { type: "code", language: "", value: "code line\n\n[a]: https://a.dev" }, { type: "paragraph", lines: [[{ type: "text", value: "[a]" }]] },
-    ]);
-    // indented up to three spaces, a comment or a tag is still the HTML block the reader reads
-    for (const indent of [" ", "  ", "   "]) {
-      expect(parseMarkdown(`${indent}<!--\n\n[docs]: https://wrong.example\n\n-->\n\n[docs]: https://right.example\n\n[docs]`, 0, true), `${indent.length} spaces`).toEqual([
-        { type: "paragraph", lines: [[{ type: "link", href: "https://right.example", children: [{ type: "text", value: "docs" }] }]] },
-      ]);
-      expect(parseMarkdown(`${indent}<div>\n\`\`\`\n</div>\n\nx\n\n\`\`\`\ncode line\n\n[a]: https://a.dev\n\`\`\`\n\n[a]`, 0, true).slice(-2), `${indent.length} spaces`).toEqual([
-        { type: "code", language: "", value: "code line\n\n[a]: https://a.dev" }, { type: "paragraph", lines: [[{ type: "text", value: "[a]" }]] },
-      ]);
-    }
-    // four spaces make no comment, as on main: the opener is text, and the first definition is the one
-    expect(parseMarkdown("    <!--\n\n[docs]: https://wrong.example\n\n-->\n\n[docs]: https://right.example\n\n[docs]", 0, true)).toEqual([
-      { type: "paragraph", lines: [[{ type: "text", value: "    <!--" }]] }, { type: "paragraph", lines: [[{ type: "text", value: "-->" }]] },
-      { type: "paragraph", lines: [[{ type: "link", href: "https://wrong.example", children: [{ type: "text", value: "docs" }] }]] },
-    ]);
-    // a tag indented in a list item is the item's text, and the ``` after it a fence
-    expect(parseMarkdown("- a\n  <div>\n  ```\n  code\n\n  [a]: https://a.dev\n  ```\n\n[a]", 0, true).slice(-2)).toEqual([
-      { type: "code", language: "", value: "code\n\n[a]: https://a.dev" }, { type: "paragraph", lines: [[{ type: "text", value: "[a]" }]] },
-    ]);
   });
 
   it("parses inline code, bold, italic, and strikethrough", () => {
@@ -781,10 +653,8 @@ describe("text no one wrote by hand", () => {
     const searches = new Set([
       /[`[<*_~$]|:codex-file-citation\{|\\\(|file:\/\/\/|https?:\/\/|www\./g,
       /\n/g, /}/g, /[\n\r\u2028\u2029]/g, /\\\)/g, /\$/g, /[\]\n]/g, /[\s)]/g,
-      // a link's title, and a bracket inside a reference's label
-      /[^ \t]/g, /["\n]/g, /['\n]/g, /[()\n]/g, /\[/g,
-      // one sticky attempt each, over a reference whose end was found
-      /\[[^\]\n]+\]/y, /\[[^\]\n]+\]\[[^\]\n]*\]/y,
+      // a link's title
+      /[^ \t]/g, /["\n]/g, /['\n]/g, /[()\n]/g,
       /_(?![\p{L}\p{N}\p{M}_])/gu,
       /__(?![\p{L}\p{N}\p{M}_])/gu,
       // Only the single-underscore token can succeed in the last fixture; trying the bold
@@ -793,7 +663,7 @@ describe("text no one wrote by hand", () => {
       // one sticky attempt, over a run with no `*` in it
       /\*\*[^*\n]+\*\*/y,
     ].map((pattern) => pattern.toString()));
-    const counted = (text: string, references?: LinkReferences): InlineNode[] => {
+    const counted = (text: string): InlineNode[] => {
       let scanned = 0;
       let unbounded = 0;
       const closer = spyOn(RegExp.prototype, "exec").mockImplementation(function (this: RegExp, input) {
@@ -811,7 +681,7 @@ describe("text no one wrote by hand", () => {
       });
       let nodes: InlineNode[];
       try {
-        nodes = parseInline(text, true, 0, references);
+        nodes = parseInline(text);
       } finally {
         closer.mockRestore();
       }
@@ -834,12 +704,6 @@ describe("text no one wrote by hand", () => {
     for (const part of ['[a](b "', "[a](b '", "[a](b (", '[a](b  "c"', "[a](b (c)"]) {
       for (const count of [1_000, 10_000]) expect(counted(part.repeat(count))).toEqual([{ type: "text", value: part.repeat(count) }]);
     }
-    // references that name nothing defined, in a text that defines one
-    const defined: LinkReferences = new Map([[referenceLabel("defined"), { destination: "https://a.dev" }]]);
-    for (const part of ["[b]", "[b][", "[b][c]", "[b][]", "[[b]", "[b ", "[b][[c]"]) {
-      for (const count of [1_000, 10_000]) expect(counted(part.repeat(count), defined)).toEqual([{ type: "text", value: part.repeat(count) }]);
-    }
-    for (const length of [5_000, 50_000]) expect(counted(`${"[".repeat(length)}defined]`, defined)).toHaveLength(2);
     // the marks are the ones it found as one pattern, searching the whole line
     const asBefore = /(`[^`\n]+`|\\\(.+?\\\)|\[[^\]\n]+\]\([^\s)]+(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?\)|<https?:\/\/[^\s<>]+>|file:\/\/\/[!#-;=?-_a-~]+|https?:\/\/[!-;=?-~]+|(?<![\w.@/-])www\.[!-;=?-~]+|\*\*[^*\n]+\*\*|(?<![\p{L}\p{N}\p{M}_])__(?=\S)[^\n]*?\S__(?![\p{L}\p{N}\p{M}_])|~~[^~\n]+~~|(?<!\*)\*[^*\n]+\*(?!\*)|(?<![\p{L}\p{N}\p{M}_])_(?=\S)[^\n]*?\S_(?![\p{L}\p{N}\p{M}_]))/gu;
     const found = (marks: Iterable<RegExpMatchArray>): string => [...marks].map((mark) => `${mark.index}:${mark[0]}`).join("\n");
@@ -862,49 +726,8 @@ describe("text no one wrote by hand", () => {
       if (/^\d+:\[a\]\(b .*\)$/m.test(marks)) titled += 1;
     }
     expect(titled).toBeGreaterThan(40);
-    // it counts searches, not time: with titles and references it runs past bun's 5 s on a loaded host
+    // it counts searches, not time: with titles it runs past bun's 5 s on a loaded host
   }, 20_000);
-
-  it("finds the references a plain reading of each bracket finds, and no others", () => {
-    const references: LinkReferences = new Map([[referenceLabel("a"), { destination: "https://a.dev" }]]);
-    const link = /\[[^\]\n]+\]\([^\s)]+(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?\)/y;
-    const known = (label: string): boolean => references.has(referenceLabel(label));
-    // CommonMark's reading: an inline link first, then `[text][label]`, `[text][]` or `[text]`, where a
-    // label after the text, defined or not, leaves the text no shortcut
-    const plainly = (line: string): string => {
-      const marks: string[] = [];
-      for (let at = 0; at < line.length;) {
-        link.lastIndex = at;
-        let token = line[at] === "[" ? link.exec(line)?.[0] ?? null : null;
-        const text = token === null ? /^\[([^[\]\n]+)\]/.exec(line.slice(at)) : null;
-        if (text !== null) {
-          const label = /^\[([^[\]\n]*)\]/.exec(line.slice(at + text[0].length));
-          if (label === null) token = known(text[1]!) ? text[0] : null;
-          else token = known(label[1] || text[1]!) ? text[0] + label[0] : null;
-        }
-        if (token === null) { at += 1; continue; }
-        marks.push(`${at}:${token}`);
-        at += token.length;
-      }
-      return marks.join("\n");
-    };
-    const lines = everyLine(["[", "a", "c", "]", "][", "](", " ", ")", "\n"], 5);
-    expect(lines.length).toBeGreaterThan(66_000);
-    let linked = 0;
-    for (const line of lines) {
-      const marks = [...inlineMarks(line, references)].map((mark) => `${mark.index}:${mark[0]}`).join("\n");
-      expect(`${line}: ${marks}`).toBe(`${line}: ${plainly(line)}`);
-      if (/^\d+:\[[^\]]*\](?:\[|$)/m.test(marks)) linked += 1;
-    }
-    expect(linked).toBeGreaterThan(1000);
-  });
-
-  it("reads definitions and many brackets in linear time", () => {
-    linear((spaces) => `[a]: https://a.dev${" ".repeat(spaces)}x`, 96_000, (text) => parseMarkdown(text));
-    linear((spaces) => `[a]: https://a.dev "t"${" ".repeat(spaces)}x`, 96_000, (text) => parseMarkdown(text));
-    linear((size) => `${"[a] [b][a] [[a]\n".repeat(size / 16)}\n[a]: https://a.dev`, 96_000, (text) => parseMarkdown(text));
-    linear((size) => `${"[".repeat(size)}a]\n\n[a]: https://a.dev`, 200_000, (text) => parseMarkdown(text));
-  });
 
   it("reads a line of dollars that never closes in linear time", () => {
     for (const part of ["$a ", "$5 ", "$a\\$", " $a$b"]) linear((size) => part.repeat(size / part.length), 200_000, (line) => parseInline(line));

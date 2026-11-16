@@ -186,9 +186,6 @@ function codexFileCitation(token: string): { path: string; label: string } | nul
   return label ? { path, label } : null;
 }
 
-/** Where an inline link goes as written (an address or a file's path), and its title. */
-interface LinkTarget { destination: string; title?: string }
-
 /**
  * The marks in a line, left to right, as one search of the line for the pattern found them. That
  * search looks from every `[`, `\(` and `_` to the end of the line for what closes it, so a long
@@ -298,7 +295,7 @@ export function* inlineMarks(source: string): Generator<RegExpExecArray> {
 }
 
 /** The address and title inside an inline link's parentheses, as `inlineMarks` found them: `https://x.dev "title"`. */
-function inlineLink(inside: string): LinkTarget {
+function inlineLink(inside: string): { destination: string; title?: string } {
   const space = inside.search(/\s/);
   return space === -1 ? { destination: inside } : { destination: inside.slice(0, space), title: inside.slice(space).trim().slice(1, -1) };
 }

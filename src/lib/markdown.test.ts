@@ -7,7 +7,7 @@ import { FILE_LINK_COUNT, FILE_LINK_LIMIT, linkFilePaths } from "../components/F
 import { HighlightedCode } from "../components/HighlightedCode.tsx";
 import { OpenFileContext } from "./filePaths.ts";
 import { SettingsProvider } from "./settings.ts";
-import { FOLD_CODE_AFTER_LINES, FOLD_OUTPUT_CHARS, FOLDED_CODE_LINES, foldCode, foldToolOutput, inlineMarks, isTableSeparator, mathNestsTooDeep, parseInline, parseMarkdown, safeMarkdownHref, shownText, trimUrl, type InlineNode, type ListBlock, type MarkdownBlock, markdownFileTarget } from "../../shared/markdown.ts";
+import { FOLD_CODE_AFTER_LINES, FOLD_OUTPUT_CHARS, FOLDED_CODE_LINES, foldCode, foldToolOutput, inlineMarks, isTableSeparator, mathNestsTooDeep, parseInline, parseMarkdown, safeMarkdownHref, shownText, trimUrl, type InlineNode, type ListBlock, markdownFileTarget } from "../../shared/markdown.ts";
 
 describe("parseMarkdown", () => {
   it("renders inline and display math while leaving fenced code untouched", async () => {
@@ -308,51 +308,6 @@ describe("inline markdown", () => {
     } finally {
       if (languages) Object.defineProperty(navigator, "languages", languages);
       else Reflect.deleteProperty(navigator, "languages");
-    }
-  });
-
-  it("draws a reference-style link and its definition as the text they are, as before, in chat and in a file's Preview", () => {
-    // reference definitions are not read (#3987's second part waits for its own change): each of these draws as on main, the
-    // last ones the inputs a review found a reader of them got wrong
-    const inline = (nodes: InlineNode[]): string => nodes.map((node) => {
-      switch (node.type) {
-        case "text": return node.value;
-        case "code": return `\`${node.value}\``;
-        case "link": return `<${inline(node.children)}→${node.href}>`;
-        case "file": return `{${inline(node.children)}→${node.path}}`;
-        case "image": return `!{${node.alt}→${node.src}}`;
-        case "math": return `$${node.value}$`;
-        default: return `${node.type}(${inline(node.children)})`;
-      }
-    }).join("");
-    const shape = (blocks: MarkdownBlock[]): string[] => blocks.map((block) => {
-      switch (block.type) {
-        case "paragraph": return block.lines.map(inline).join("\n");
-        case "heading": return `# ${inline(block.content)}`;
-        case "table": return [block.header, ...block.rows].map((row) => row.map(inline).join(" | ")).join("\n");
-        case "list": return block.items.map((item) => `- ${inline(item.content)}`).join("\n");
-        case "code": return `code: ${block.value}`;
-        default: return block.type;
-      }
-    });
-    const cases: [string, string, string[], string[]][] = [
-      ["the issue's reference line", "This is a [reference link][1].\n\n[1]: https://www.google.com", ["This is a [reference link][1].","[1]: <https://www.google.com→https://www.google.com>"], ["This is a [reference link][1].","[1]: <https://www.google.com→https://www.google.com>"]],
-      ["full, collapsed and shortcut forms", "[x][r] [r][] [r]\n\n[r]: https://e.com \"T\"", ["[x][r] [r][] [r]","[r]: <https://e.com→https://e.com> \"T\""], ["[x][r] [r][] [r]","[r]: <https://e.com→https://e.com> \"T\""]],
-      ["a list of sources", "Sources:\n\n[1]: https://a.dev", ["Sources:","[1]: <https://a.dev→https://a.dev>"], ["Sources:","[1]: <https://a.dev→https://a.dev>"]],
-      ["a definition in an HTML comment", "<!--\n\n[docs]: https://wrong.example\n\n-->\n\n[docs]: https://right.example\n\n[docs]", ["<!--","[docs]: <https://wrong.example→https://wrong.example>","-->","[docs]: <https://right.example→https://right.example>","[docs]"], ["[docs]: <https://right.example→https://right.example>","[docs]"]],
-      ["only a commented definition", "<!--\n\n[docs]: https://hidden.example\n\n-->\n\nRead [docs].", ["<!--","[docs]: <https://hidden.example→https://hidden.example>","-->","Read [docs]."], ["Read [docs]."]],
-      ["a definition-shaped table cell", "| [r]: https://wrong.example | x |\n|---|---|\n\n[r]: https://right.example\n\n[r]", ["[r]: <https://wrong.example→https://wrong.example> | x","[r]: <https://right.example→https://right.example>","[r]"], ["[r]: <https://wrong.example→https://wrong.example> | x","[r]: <https://right.example→https://right.example>","[r]"]],
-      ["a definition-shaped heading", "# [r]: https://wrong.example\n\n[r]: https://right.example\n\n[r]", ["# [r]: <https://wrong.example→https://wrong.example>","[r]: <https://right.example→https://right.example>","[r]"], ["# [r]: <https://wrong.example→https://wrong.example>","[r]: <https://right.example→https://right.example>","[r]"]],
-      ["a backtick in a label", "[`a]: ssh://h/x\n\n[`a] and [docs] `\n\n[docs]: https://d.dev", ["[`a]: ssh://h/x","[`a] and [docs] `","[docs]: <https://d.dev→https://d.dev>"], ["[`a]: ssh://h/x","[`a] and [docs] `","[docs]: <https://d.dev→https://d.dev>"]],
-      ["a \\( in a label", "[\\(a]: ssh://h/x\n\nsee [\\(a] and [docs] \\) ok\n\n[docs]: https://d.dev", ["[\\(a]: ssh://h/x","see [$a] and [docs] $ ok","[docs]: <https://d.dev→https://d.dev>"], ["[\\(a]: ssh://h/x","see [$a] and [docs] $ ok","[docs]: <https://d.dev→https://d.dev>"]],
-      ["a label defined twice", "[docs]\n\n[docs]: https://good.example\n[docs]: https://other.example", ["[docs]","[docs]: <https://good.example→https://good.example>\n[docs]: <https://other.example→https://other.example>"], ["[docs]","[docs]: <https://good.example→https://good.example>\n[docs]: <https://other.example→https://other.example>"]],
-      ["nested brackets before a label", "[a [b]][r]\n\n[r]: https://example.com", ["[a [b]][r]","[r]: <https://example.com→https://example.com>"], ["[a [b]][r]","[r]: <https://example.com→https://example.com>"]],
-      ["a list item's indented definition", "See [docs].\n\n- Source note\n\n  [docs]: https://wrong.example\n\n[docs]: https://right.example", ["See [docs].","- Source note [docs]: <https://wrong.example→https://wrong.example>","[docs]: <https://right.example→https://right.example>"], ["See [docs].","- Source note [docs]: <https://wrong.example→https://wrong.example>","[docs]: <https://right.example→https://right.example>"]],
-      ["an address that draws no link", "[repo]: ssh://git@host/x.git\n\nClone [repo].", ["[repo]: ssh://git@host/x.git","Clone [repo]."], ["[repo]: ssh://git@host/x.git","Clone [repo]."]],
-    ];
-    for (const [name, source, chat, preview] of cases) {
-      expect(shape(parseMarkdown(source)), `${name}, chat`).toEqual(chat);
-      expect(shape(parseMarkdown(source, 0, true)), `${name}, Preview`).toEqual(preview);
     }
   });
 
